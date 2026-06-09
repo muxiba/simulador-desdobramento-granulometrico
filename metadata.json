@@ -1,0 +1,6 @@
+{
+  "name": "Simulador de Desdobramento Granulométrico",
+  "description": "Ferramenta para simulação e desdobramento físico-químico de frações granulométricas (G1, G2, G3, G4) a partir de dados de cubagem do Mine Sight.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
