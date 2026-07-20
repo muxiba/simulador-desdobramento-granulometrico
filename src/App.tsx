@@ -258,6 +258,25 @@ export default function App() {
       csv += `${el.label}\t${analyzed.toFixed(el.precision)}\t${calculated.toFixed(el.precision)}\t${(diff >= 0 ? "+" : "")}${diff.toFixed(el.precision)}\t${statusText}\n`;
     });
 
+    csv += "\nSIMULAÇÃO DE RECONCILIAÇÃO QUÍMICA ALVO (ITEM 7 - TOLERÂNCIA 5%)\n";
+    csv += "Fração\tMassa Reconciliada (t)\tRendimento (%)";
+    ELEMENTS.forEach(el => {
+      csv += `\t${el.label} Reconciliado (%)`;
+    });
+    csv += "\n";
+    PRODUCTS.forEach(p => {
+      csv += `${p.name}\t${simulation.productMasses[p.id].toFixed(2)}\t${simulation.ratios[p.id].toFixed(2)}%`;
+      ELEMENTS.forEach(el => {
+        const originalGrade = simulation.productChem[p.id][el.id] || 0;
+        const analyzedGlobal = rows[selectedRowIndex]?.globalChem[el.id] || 0;
+        const simulatedGlobal = simulation.globalChem[el.id] || 0;
+        const factor = simulatedGlobal > 0 ? (analyzedGlobal / simulatedGlobal) : 1;
+        const reconciledGrade = originalGrade * factor;
+        csv += `\t${reconciledGrade.toFixed(el.id === "P" ? 3 : 2)}`;
+      });
+      csv += "\n";
+    });
+
     navigator.clipboard.writeText(csv).then(() => {
       setCopySuccess(true);
       setTimeout(() => setCopySuccess(false), 2500);
@@ -1044,6 +1063,136 @@ export default function App() {
                     <p className="text-[11px] text-blue-700 leading-relaxed">
                       <strong>Nota de Engenharia Processual:</strong> A química analisada global é o valor real contido na cubagem. A calculada é deduzida via ponderação de massa das frações de G1 a G4. Divergências ocorrem devido ao banco ainda possuir apenas poucas análises de frações granulométricas. À medida que mais amostras forem ensaiadas em G1-G4, os dois valores convergirão para um resultado único (Desvio tende a zero).
                     </p>
+                  </div>
+                </div>
+
+                {/* 7. Reconciled Products Grid */}
+                <div className="space-y-6">
+                  <div className="border-b border-slate-100 pb-4 flex items-center gap-2">
+                    <div className="p-1.5 bg-purple-50 rounded-lg text-purple-600 border border-purple-100">
+                      <Sparkles className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <h2 className="text-base font-bold text-slate-800">
+                        7. Simulação de Reconciliação Química Alvo (Tolerância 5%)
+                      </h2>
+                      <span className="text-xs text-slate-500">
+                        Química recalculada das frações (G1-G4) para forçar convergência exata com a química global analisada do banco de dados
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Summary of Reconciliation Factors */}
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 shadow-xs">
+                    <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">
+                      Fatores de Ajuste Necessários para Reconciliação
+                    </h3>
+                    <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+                      {ELEMENTS.map(el => {
+                        const analyzed = rows[selectedRowIndex]?.globalChem[el.id] || 0;
+                        const simulated = simulation.globalChem[el.id] || 0;
+                        const factor = simulated > 0 ? (analyzed / simulated) : 1;
+                        const pctChange = (factor - 1) * 100;
+                        const isHigh = Math.abs(pctChange) > 5;
+
+                        return (
+                          <div
+                            key={el.id}
+                            className={`border rounded-xl p-3 flex flex-col justify-between transition-all ${
+                              isHigh 
+                                ? "bg-rose-50/50 border-rose-200 text-rose-900 animate-pulse" 
+                                : "bg-white border-slate-200 text-slate-900"
+                            }`}
+                          >
+                            <span className="text-xs font-bold">{el.label}</span>
+                            <span className="text-base font-bold font-mono my-1.5">
+                              {pctChange >= 0 ? "+" : ""}{pctChange.toFixed(2)}%
+                            </span>
+                            <span className={`text-[9px] px-1.5 py-0.5 rounded text-center font-bold border ${
+                              isHigh 
+                                ? "bg-rose-100 text-rose-700 border-rose-300" 
+                                : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            }`}>
+                              {isHigh ? "Ajuste Alto (>5%)" : "Adequado (≤5%)"}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {PRODUCTS.map(p => {
+                      const mass = simulation.productMasses[p.id] || 0;
+                      const yieldPct = simulation.ratios[p.id] || 0;
+                      const pChem = simulation.productChem[p.id] || {};
+
+                      return (
+                        <div
+                          key={p.id}
+                          className="bg-white border border-slate-200 rounded-2xl overflow-hidden hover:border-purple-300 hover:shadow-xs transition-all flex flex-col justify-between shadow-sm"
+                        >
+                          <div className="px-4 py-3 flex items-center justify-between bg-purple-50/30 border-b border-purple-100">
+                            <div>
+                              <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: p.color }} />
+                                {p.name}
+                              </h3>
+                              <span className="text-[10px] text-slate-500 font-mono block mt-0.5">
+                                Granulometria Reconciliada
+                              </span>
+                            </div>
+                            <span className="text-[11px] font-bold py-0.5 px-2 bg-white border border-purple-200 text-purple-700 rounded font-mono shadow-xs">
+                              {p.id}
+                            </span>
+                          </div>
+
+                          <div className="px-4 py-3.5 bg-slate-50/50 font-sans space-y-1 border-b border-slate-100">
+                            <div className="flex justify-between items-center">
+                              <span className="text-[10px] text-slate-500 font-medium">Massa Reconciliada:</span>
+                              <span className="text-xs font-bold font-mono" style={{ color: p.color }}>
+                                {mass.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} t
+                              </span>
+                            </div>
+                            <div className="flex justify-between items-center">
+                              <span className="text-[10px] text-slate-500 font-medium">Fração de Rendimento:</span>
+                              <span className="text-xs font-bold text-slate-700 font-mono">
+                                {yieldPct.toFixed(2)}%
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="p-4 bg-white space-y-2">
+                            {ELEMENTS.map(el => {
+                              const originalGrade = pChem[el.id] || 0;
+                              const analyzedGlobal = rows[selectedRowIndex]?.globalChem[el.id] || 0;
+                              const simulatedGlobal = simulation.globalChem[el.id] || 0;
+                              const factor = simulatedGlobal > 0 ? (analyzedGlobal / simulatedGlobal) : 1;
+                              const reconciledGrade = originalGrade * factor;
+                              
+                              return (
+                                <div key={el.id} className="flex justify-between items-center text-xs">
+                                  <span className="text-slate-500 font-medium">{el.label}</span>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[10px] text-slate-400 line-through font-mono">
+                                      {originalGrade.toFixed(el.precision)}%
+                                    </span>
+                                    <ChevronRight className="h-3 w-3 text-slate-400" />
+                                    <span className="font-bold text-purple-700 font-mono">
+                                      {reconciledGrade.toLocaleString("pt-BR", {
+                                        minimumFractionDigits: el.precision,
+                                        maximumFractionDigits: el.precision
+                                      })}
+                                      %
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 

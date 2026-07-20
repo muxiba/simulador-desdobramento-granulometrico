@@ -429,6 +429,11 @@ export function generateStandaloneHTML(): string {
         <h2 style="margin-top:32px; border-top: 1px solid #f1f5f9; padding-top:20px;">6. Comparativo Química Analisada Global vs. Calculada pelas Frações</h2>
         <p style="font-size:0.9em; color:#64748b; margin-bottom:20px;">Divergência atual entre os ensaios globais do banco e a média ponderada física e química das frações.</p>
         <div id="comparisonContainer" style="margin-bottom:40px;"></div>
+
+        <!-- 7. Simulação de Reconciliação Química Alvo (Tolerância 5%) -->
+        <h2 style="margin-top:32px; border-top: 1px solid #f1f5f9; padding-top:20px;">7. Simulação de Reconciliação Química Alvo (Tolerância 5%)</h2>
+        <p style="font-size:0.9em; color:#64748b; margin-bottom:20px;">Química recalculada das frações (G1-G4) para forçar convergência exata com a química global analisada do banco de dados.</p>
+        <div id="reconciliationContainer" style="margin-bottom:40px;"></div>
     </div>
 </div>
 
@@ -772,6 +777,95 @@ export function generateStandaloneHTML(): string {
                     '</div>' +
                 '</div>';
         }
+
+        // Render Item 7: Reconciliation
+        let reconciliationFactors = {};
+        const row = baseData.rows[selectedRowIdx];
+        elements.forEach(el => {
+            let analyzed = row.globalChem[el.id] || 0;
+            let simulated = finalGlobalChem[el.id] || 0;
+            reconciliationFactors[el.id] = simulated > 0 ? (analyzed / simulated) : 1;
+        });
+
+        const reconContainer = document.getElementById('reconciliationContainer');
+        if (reconContainer) {
+            let factorsHtml = '';
+            elements.forEach(el => {
+                const pctChange = (reconciliationFactors[el.id] - 1) * 100;
+                const isHigh = Math.abs(pctChange) > 5;
+                const badgeStyle = isHigh 
+                    ? 'background:#ffe4e6; color:#9f1239; border:1px solid #fecdd3;'
+                    : 'background:#d1fae5; color:#065f46; border:1px solid #a7f3d0;';
+                const badgeText = isHigh ? 'Ajuste Alto (>5%)' : 'Adequado (≤5%)';
+                const cardStyle = isHigh
+                    ? 'background:#fff5f5; border:1px solid #feb2b2; padding:12px; border-radius:8px; text-align:center;'
+                    : 'background:white; border:1px solid #e2e8f0; padding:12px; border-radius:8px; text-align:center;';
+
+                factorsHtml += 
+                    '<div style="' + cardStyle + '">' +
+                        '<div style="font-weight:bold; font-size:12px; color:#475569;">' + el.label + '</div>' +
+                        '<div style="font-size:16px; font-weight:bold; font-family:monospace; margin:8px 0; color:#0f172a;">' + (pctChange >= 0 ? '+' : '') + pctChange.toFixed(2) + '%</div>' +
+                        '<div style="display:inline-block; font-size:10px; font-weight:700; padding:2px 8px; border-radius:10px; ' + badgeStyle + '">' + badgeText + '</div>' +
+                    '</div>';
+            });
+
+            let cardsHtml = '';
+            products.forEach((prod, pIdx) => {
+                let splitPct = parseFloat(document.getElementById('split_' + prod.id).value) || 0;
+                let ratio = totalSplitInput > 0 ? (splitPct / totalSplitInput) : 0;
+                let newMass = targetMass * ratio;
+                let yieldPct = totalSplitInput > 0 ? (splitPct*100)/totalSplitInput : 0;
+
+                let rowChemHtml = '';
+                elements.forEach(el => {
+                    let originalGrade = (baseData.products[prod.id][el.id] || 0) * factors[el.id];
+                    let reconciledGrade = originalGrade * reconciliationFactors[el.id];
+                    let prec = getPrecision(el.id);
+                    
+                    rowChemHtml += 
+                        '<div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; border-bottom:1px solid #f1f5f9; padding:6px 0;">' +
+                            '<span style="color:#64748b; font-weight:500;">' + el.label + '</span>' +
+                            '<div style="display:flex; align-items:center; gap:6px;">' +
+                                '<span style="color:#94a3b8; text-decoration:line-through; font-family:monospace; font-size:11px;">' + fmtNum(originalGrade, prec) + '%</span>' +
+                                '<span style="color:#64748b; font-size:10px;">→</span>' +
+                                '<span style="color:#7c3aed; font-weight:700; font-family:monospace;">' + fmtNum(reconciledGrade, prec) + '%</span>' +
+                            '</div>' +
+                        '</div>';
+                });
+
+                cardsHtml += 
+                    '<div class="table-res" style="border:1px solid #e2e8f0; border-radius:12px; overflow:hidden; background:white; box-shadow:0 1px 3px rgba(0,0,0,0.02); display:flex; flex-direction:column; justify-content:space-between;">' +
+                        '<div style="background:#f5f3ff; color:#6d28d9; font-weight:bold; padding:12px; text-align:center; border-bottom:1px solid #ddd6fe; display:flex; justify-content:space-between; align-items:center;">' +
+                            '<span>' + prod.name + '</span>' +
+                            '<span style="background:white; border:1px solid #c084fc; padding:2px 6px; border-radius:4px; font-size:10px; color:#7c3aed; font-family:monospace;">' + prod.id + '</span>' +
+                        '</div>' +
+                        '<div style="padding:12px; background:#faf5ff; border-bottom:1px solid #ddd6fe; font-size:12px;">' +
+                            '<div style="display:flex; justify-content:space-between; margin-bottom:4px;">' +
+                                '<span style="color:#64748b;">Massa Reconciliada:</span>' +
+                                '<span style="font-weight:bold; color:' + prod.color + '; font-family:monospace;">' + fmtNum(newMass, 2) + ' t</span>' +
+                            '</div>' +
+                            '<div style="display:flex; justify-content:space-between;">' +
+                                '<span style="color:#64748b;">Fração:</span>' +
+                                '<span style="font-weight:bold; color:#334155; font-family:monospace;">' + fmtNum(yieldPct, 2) + '%</span>' +
+                            '</div>' +
+                        '</div>' +
+                        '<div style="padding:12px; background:white;">' +
+                            rowChemHtml +
+                        '</div>' +
+                    '</div>';
+            });
+
+            reconContainer.innerHTML = 
+                '<div style="margin-bottom:24px;">' +
+                    '<div style="font-size:11px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:12px;">Fatores de Ajuste Necessários para Reconciliação</div>' +
+                    '<div style="display:grid; grid-template-columns:repeat(6, 1fr); gap:12px;">' +
+                        factorsHtml +
+                    '</div>' +
+                '</div>' +
+                '<div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:16px;">' +
+                    cardsHtml +
+                '</div>';
+        }
         
         renderPie(massData);
         elements.forEach(el => renderLineChart(el, chartsData[el.id]));
@@ -874,6 +968,65 @@ export function generateStandaloneHTML(): string {
                 csv += Array.from(tr.querySelectorAll("th, td")).map(el => el.innerText).join("\\t") + "\\n";
             });
         }
+
+        // Item 7 Export recalculation
+        const targetMass = parseFloat(document.getElementById('targetOre').value) || 0;
+        let totalSplitInput = 0;
+        products.forEach(prod => totalSplitInput += parseFloat(document.getElementById('split_' + prod.id).value) || 0);
+
+        let factors = {};
+        elements.forEach(el => {
+            let targetGlobal = parseFloat(document.getElementById('global_' + el.id).value) || 0;
+            let baseNatural = baseData.global[el.id];
+            factors[el.id] = baseNatural === 0 ? 1 : targetGlobal / baseNatural;
+        });
+
+        let finalGlobalChem = {};
+        elements.forEach(el => finalGlobalChem[el.id] = 0);
+        let finalTotalMass = 0;
+        products.forEach(prod => {
+            let splitPct = parseFloat(document.getElementById('split_' + prod.id).value) || 0;
+            let ratio = totalSplitInput > 0 ? (splitPct / totalSplitInput) : 0;
+            let newMass = targetMass * ratio;
+            finalTotalMass += newMass;
+            elements.forEach(el => {
+                let adjustedGrade = (baseData.products[prod.id][el.id] || 0) * factors[el.id];
+                finalGlobalChem[el.id] += (adjustedGrade * newMass);
+            });
+        });
+        elements.forEach(el => finalGlobalChem[el.id] = finalTotalMass > 0 ? finalGlobalChem[el.id] / finalTotalMass : 0);
+
+        let reconciliationFactors = {};
+        const row = baseData.rows[selectedRowIdx];
+        elements.forEach(el => {
+            let analyzed = row.globalChem[el.id] || 0;
+            let simulated = finalGlobalChem[el.id] || 0;
+            reconciliationFactors[el.id] = simulated > 0 ? (analyzed / simulated) : 1;
+        });
+
+        csv += "\\nSIMULAÇÃO DE RECONCILIAÇÃO QUÍMICA ALVO (ITEM 7 - TOLERÂNCIA 5%)\\n";
+        csv += "Fração\\tMassa Reconciliada (t)\\tRendimento (%)";
+        elements.forEach(el => {
+            csv += "\\t" + el.label + " Reconciliado (%)";
+        });
+        csv += "\\n";
+        
+        products.forEach(prod => {
+            let splitPct = parseFloat(document.getElementById('split_' + prod.id).value) || 0;
+            let ratio = totalSplitInput > 0 ? (splitPct / totalSplitInput) : 0;
+            let newMass = targetMass * ratio;
+            let yieldPct = totalSplitInput > 0 ? (splitPct*100)/totalSplitInput : 0;
+            
+            csv += prod.name + "\\t" + newMass.toFixed(2) + "\\t" + yieldPct.toFixed(2) + "%";
+            
+            elements.forEach(el => {
+                let originalGrade = (baseData.products[prod.id][el.id] || 0) * factors[el.id];
+                let reconciledGrade = originalGrade * reconciliationFactors[el.id];
+                csv += "\\t" + reconciledGrade.toFixed(getPrecision(el.id));
+            });
+            csv += "\\n";
+        });
+
         navigator.clipboard.writeText(csv).then(() => alert("Dados formatados em Tabulação copiados com sucesso! Basta colar no Excel."));
     }
 </script>
