@@ -17,9 +17,11 @@ import {
   AlertCircle
 } from "lucide-react";
 
-const SAMPLE_PASTE = `Cut\tMaterial\tVolume\tTonnes\tFEGL\tSIGL\tALGL\tPGL\tMNGL\tPFGL\tG1\tFE1\tSI1\tAL1\tP1\tMN1\tPF1\tG2\tFE2\tSI2\tAL2\tP2\tMN2\tPF2\tG3\tFE3\tSI3\tAL3\tP3\tMN3\tPF3\tG4\tFE4\tSI4\tAL4\tP4\tMN4\tPF4
-1\tREJEITO\t33,772.55\t84,431.37\t46.56\t22.48\t4.55\t0.08\t0.53\t4.59\t25.08\t55.18\t4.45\t1.76\t0.07\t0.75\t3.63\t17.05\t52.73\t9.48\t1.43\t0.06\t0.74\t2.71\t27.92\t44.69\t22.76\t2.04\t0.04\t0.25\t1.59\t19.97\t48.35\t9.90\t3.65\t0.11\t0.94\t5.79
-2\tBOCO\t12,450.00\t31,125.00\t58.20\t9.50\t2.10\t0.05\t0.12\t2.15\t30.00\t62.50\t3.10\t1.10\t0.04\t0.10\t1.80\t20.00\t60.10\t4.90\t1.50\t0.05\t0.12\t2.00\t25.00\t56.30\t12.40\t2.30\t0.06\t0.14\t2.30\t15.00\t51.20\t18.20\t3.80\t0.07\t0.15\t2.80`;
+const SAMPLE_PASTE = `Cut\tVolume\tTonnes\tFEGL\tSIGL\tALGL\tPGL\tMNGL\tPFGL\tG1\tFE1\tSI1\tAL1\tP1\tMN1\tPF1\tG2\tFE2\tSI2\tAL2\tP2\tMN2\tPF2\tG3\tFE3\tSI3\tAL3\tP3\tMN3\tPF3\tG4\tFE4\tSI4\tAL4\tP4\tMN4\tPF4
+1\t58,336.50\t145,841.25\t42.88\t32.44\t2.67\t0.05\t0.20\t2.55\t6.65\t29.36\t10.00\t2.98\t0.06\t0.14\t3.25\t10.82\t23.09\t20.82\t2.16\t0.04\t0.13\t2.54\t32.02\t25.24\t21.05\t0.45\t0.02\t0.06\t0.91\t8.80\t28.44\t11.45\t2.66\t0.05\t0.12\t3.49
+2\t5,042.28\t12,605.70\t48.86\t20.85\t3.99\t0.06\t0.39\t4.04\t19.37\t55.66\t11.88\t3.17\t0.07\t0.17\t5.03\t19.43\t51.43\t20.57\t2.36\t0.06\t0.21\t3.30\t41.87\t48.84\t26.99\t1.39\t0.04\t0.11\t1.91\t19.32\t50.29\t14.67\t6.04\t0.09\t0.30\t6.86
+3\t1,880.12\t4,700.29\t42.79\t30.10\t3.65\t0.07\t0.44\t3.71\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00
+4\t5,788.48\t14,471.21\t41.59\t32.04\t3.59\t0.06\t0.41\t3.62\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00\t0.00`;
 
 const getConvergenceStatus = (elId: string, diff: number) => {
   const absDiff = Math.abs(diff);
@@ -379,32 +381,62 @@ export default function App() {
                     Cortes Identificados ({rows.length})
                   </span>
                   <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-                    {rows.map((row, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => selectRow(rows, idx)}
-                        className={`w-full text-left p-2.5 rounded-lg transition-all flex items-center justify-between text-xs border ${
-                          idx === selectedRowIndex
-                            ? "bg-blue-50 border-blue-200 text-blue-900 font-semibold shadow-sm"
-                            : "bg-slate-50 border-slate-100 hover:bg-slate-100/60 text-slate-600"
-                        }`}
-                      >
-                        <div className="truncate pr-2">
-                          <span className="text-slate-400 block text-[9px] uppercase tracking-wide">
-                            Corte {row.cut}
-                          </span>
-                          <span className="truncate font-semibold text-slate-800">{row.material}</span>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <span className="font-mono block text-slate-700">
-                            {row.tonnes.toLocaleString("pt-BR", { maximumFractionDigits: 0 })} t
-                          </span>
-                          <span className="text-[10px] text-blue-600 font-semibold animate-pulse">
-                            Fe {row.globalChem.FE.toFixed(2)}%
-                          </span>
-                        </div>
-                      </button>
-                    ))}
+                    {rows.map((row, idx) => {
+                      const splitSum = (row.splits.G1 || 0) + (row.splits.G2 || 0) + (row.splits.G3 || 0) + (row.splits.G4 || 0);
+                      return (
+                        <button
+                          key={idx}
+                          onClick={() => selectRow(rows, idx)}
+                          className={`w-full text-left p-2.5 rounded-lg transition-all flex flex-col gap-1.5 border ${
+                            idx === selectedRowIndex
+                              ? "bg-blue-50 border-blue-200 text-blue-900 font-semibold shadow-sm"
+                              : "bg-slate-50 border-slate-100 hover:bg-slate-100/60 text-slate-600"
+                          }`}
+                        >
+                          <div className="flex justify-between items-center w-full">
+                            <span className="font-bold text-slate-800">
+                              Corte {row.cut}
+                            </span>
+                            <span className="font-mono text-slate-700">
+                              {row.tonnes.toLocaleString("pt-BR", { maximumFractionDigits: 0 })} t
+                            </span>
+                          </div>
+                          
+                          {row.material && (
+                            <span className="truncate text-slate-500 text-[10px] -mt-1 block">
+                              {row.material}
+                            </span>
+                          )}
+
+                          <div className="flex justify-between items-center w-full mt-1.5 border-t border-slate-100 pt-1.5">
+                            {(() => {
+                              if (splitSum === 0) {
+                                return (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                                    🔴 Sem Amostras
+                                  </span>
+                                );
+                              } else if (splitSum < 99.8) {
+                                return (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                    🟡 Incompleta ({splitSum.toFixed(1)}%)
+                                  </span>
+                                );
+                              } else {
+                                return (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                    🟢 Completa
+                                  </span>
+                                );
+                              }
+                            })()}
+                            <span className="text-[10px] text-blue-600 font-bold">
+                              Fe {row.globalChem.FE.toFixed(2)}%
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -454,24 +486,51 @@ export default function App() {
                 </div>
               ) : (
                 <>
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4 mb-6">
-                    <div className="flex items-center gap-2">
-                      <div className="p-1.5 bg-blue-50 rounded-lg text-blue-600 border border-blue-100">
-                        <SlidersHorizontal className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <h2 className="text-base font-bold text-slate-900 flex items-center gap-2 flex-wrap">
-                          2. Ajustes Interativos do Cenário
-                          <span className="text-slate-600 font-medium bg-slate-100 px-2.5 py-0.5 rounded-full text-xs">
-                             Corte {rows[selectedRowIndex]?.cut || ""}: {rows[selectedRowIndex]?.material || ""}
-                          </span>
-                        </h2>
-                        <p className="text-xs text-slate-500">
-                          Os fatores multiplicadores de extrapolação física e química recalculam as frações instantaneamente
+                  {(() => {
+                    const selectedRow = rows[selectedRowIndex];
+                    const splitSum = (selectedRow?.splits.G1 || 0) + (selectedRow?.splits.G2 || 0) + (selectedRow?.splits.G3 || 0) + (selectedRow?.splits.G4 || 0);
+                    if (splitSum === 0) return (
+                      <div className="py-16 flex flex-col items-center justify-center text-center px-4">
+                        <AlertCircle className="h-14 w-14 text-rose-500 mb-4 animate-bounce" />
+                        <h3 className="text-xl font-bold text-slate-800">Setor Sem Dados Granuloquímicos</h3>
+                        <p className="text-sm text-slate-500 max-w-lg mt-2 leading-relaxed">
+                          Não existem análises granulométricas (frações G1 a G4) cadastradas no banco para o <strong>Corte {selectedRow?.cut}</strong>. 
+                          Os cálculos de desdobramento, balanço de massas e reconciliação química não podem ser executados para este setor.
                         </p>
+                        <div className="mt-6 p-4 bg-rose-50 border border-rose-100 rounded-xl max-w-md text-left flex gap-2.5">
+                          <Sparkles className="h-5 w-5 text-rose-500 shrink-0 mt-0.5" />
+                          <p className="text-xs text-rose-800 leading-relaxed">
+                            <strong>Recomendação Geológica:</strong> Solicite à equipe de laboratório/geologia a realização de ensaios de granuloquímica (desdobramento em G1, G2, G3 e G4) para as amostras deste setor de lavra.
+                          </p>
+                        </div>
+                      </div>
+                    );
+                    return null;
+                  })()}
+                  {(() => {
+                    const selectedRow = rows[selectedRowIndex];
+                    const splitSum = (selectedRow?.splits.G1 || 0) + (selectedRow?.splits.G2 || 0) + (selectedRow?.splits.G3 || 0) + (selectedRow?.splits.G4 || 0);
+                    if (splitSum === 0) return null;
+                    return (
+                  <>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4 mb-6">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 bg-blue-50 rounded-lg text-blue-600 border border-blue-100">
+                          <SlidersHorizontal className="h-4 w-4" />
+                        </div>
+                        <div>
+                          <h2 className="text-base font-bold text-slate-900 flex items-center gap-2 flex-wrap">
+                            2. Ajustes Interativos do Cenário
+                            <span className="text-slate-600 font-medium bg-slate-100 px-2.5 py-0.5 rounded-full text-xs">
+                               Corte {rows[selectedRowIndex]?.cut || ""}{rows[selectedRowIndex]?.material ? `: ${rows[selectedRowIndex]?.material}` : ""}
+                            </span>
+                          </h2>
+                          <p className="text-xs text-slate-500">
+                            Os fatores multiplicadores de extrapolação física e química recalculam as frações instantaneamente
+                          </p>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
                   {/* Subsection A: Chemistry controls */}
                   <div className="space-y-4 mb-8">
@@ -630,12 +689,19 @@ export default function App() {
                     )}
                   </div>
                 </>
+                    );
+                  })()}
+                </>
               )}
             </div>
 
             {/* Simulated Case Results */}
-            {simulation && (
-              <div id="results-panel" className="space-y-8 animate-fade-in">
+            {simulation && (() => {
+              const selectedRow = rows[selectedRowIndex];
+              const splitSum = (selectedRow?.splits.G1 || 0) + (selectedRow?.splits.G2 || 0) + (selectedRow?.splits.G3 || 0) + (selectedRow?.splits.G4 || 0);
+              if (splitSum === 0) return null;
+              return (
+                <div id="results-panel" className="space-y-8 animate-fade-in">
                 
                 {/* 3. Global Results Card */}
                 <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm text-slate-900">
@@ -1197,7 +1263,7 @@ export default function App() {
                 </div>
 
               </div>
-            )}
+            )})()}
 
           </div>
           

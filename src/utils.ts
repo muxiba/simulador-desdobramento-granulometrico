@@ -86,7 +86,11 @@ export function parsePastedData(rawText: string): MiningRow[] {
     };
 
     const cut = getValByName("Cut") || getValByName("Cuts") || rawValues[0] || `${rows.length + 1}`;
-    const material = getValByName("Material") || getValByName("Tipo") || rawValues[1] || "MINERIO";
+    // Material is optional - if the header 'Material' exists, use it; otherwise leave empty
+    const hasMaterialCol = headers.some(h => h.trim().toUpperCase() === "MATERIAL" || h.trim().toUpperCase() === "TIPO");
+    const material = hasMaterialCol
+      ? (getValByName("Material") || getValByName("Tipo") || "")
+      : "";
     const volume = parseNum(getValByName("Volume") || rawValues[2]);
     const tonnes = parseNum(getValByName("Tonnes") || getValByName("Toneladas") || rawValues[3]);
 
@@ -349,6 +353,9 @@ export function generateStandaloneHTML(): string {
             </div>
         </div>
 
+        <!-- No Data Warning Panel -->
+        <div id="noDataPanel" style="display:none; background:#fff; border:1px solid #fecdd3; border-radius:14px; margin-bottom:24px;"></div>
+
         <!-- 2. Ajustes -->
         <div class="edit-panel" id="editPanel" style="opacity:0.4; pointer-events:none; transition: opacity 0.3s;">
             <h3 style="display: flex; align-items: center; gap: 8px;">
@@ -516,7 +523,9 @@ export function generateStandaloneHTML(): string {
             };
 
             const cut = getColVal("Cut") || getColVal("Cuts") || vals[0] || (foundRows.length+1);
-            const mat = getColVal("Material") || getColVal("Tipo") || vals[1] || "MINERIO";
+            // Material is optional - only read if column header 'Material' actually exists
+            const hasMaterialCol = headers.some(h => h.trim().toUpperCase() === 'MATERIAL' || h.trim().toUpperCase() === 'TIPO');
+            const mat = hasMaterialCol ? (getColVal("Material") || getColVal("Tipo") || "") : "";
             const volume = parseNum(getColVal("Volume") || vals[2]);
             const tonnes = parseNum(getColVal("Tonnes") || getColVal("Toneladas") || vals[3]);
 
@@ -565,7 +574,20 @@ export function generateStandaloneHTML(): string {
         baseData.rows.forEach((row, idx) => {
             const el = document.createElement('div');
             el.className = 'row-option ' + (idx === selectedRowIdx ? 'selected' : '');
-            el.innerHTML = '<span>Corte ' + row.cut + ' - <strong>' + row.material + '</strong></span> <span>' + fmtNum(row.tonnes, 0) + ' t (Fe Alvo: ' + row.globalChem.FE.toFixed(2) + '%)</span>';
+            const splitSum = (row.splits.G1||0)+(row.splits.G2||0)+(row.splits.G3||0)+(row.splits.G4||0);
+            let badge = '';
+            if (splitSum === 0) {
+                badge = '<span style="background:#fff1f2;color:#be123c;border:1px solid #fecdd3;border-radius:4px;padding:1px 5px;font-size:9px;font-weight:700;margin-left:4px;">🔴 Sem Amostras</span>';
+            } else if (splitSum < 99.8) {
+                badge = '<span style="background:#fffbeb;color:#b45309;border:1px solid #fde68a;border-radius:4px;padding:1px 5px;font-size:9px;font-weight:700;margin-left:4px;">🟡 Incompleta (' + splitSum.toFixed(1) + '%)</span>';
+            } else {
+                badge = '<span style="background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;border-radius:4px;padding:1px 5px;font-size:9px;font-weight:700;margin-left:4px;">🟢 Completa</span>';
+            }
+            const materialLabel = row.material ? ' &mdash; <strong>' + row.material + '</strong>' : '';
+            el.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;width:100%;flex-wrap:wrap;gap:4px;">'
+                + '<span>Corte ' + row.cut + materialLabel + badge + '</span>'
+                + '<span style="font-size:10px;color:#475569;">' + fmtNum(row.tonnes, 0) + ' t &bull; Fe ' + row.globalChem.FE.toFixed(2) + '%</span>'
+                + '</div>';
             el.onclick = () => selectRow(idx);
             list.appendChild(el);
         });
@@ -581,6 +603,38 @@ export function generateStandaloneHTML(): string {
         document.querySelectorAll('.row-option').forEach((el, i) => {
             el.className = 'row-option ' + (i === idx ? 'selected' : '');
         });
+
+        // Check if this row has any granulometric data
+        const splitSum = (row.splits.G1||0)+(row.splits.G2||0)+(row.splits.G3||0)+(row.splits.G4||0);
+        const editPanel = document.getElementById('editPanel');
+        const noDataPanel = document.getElementById('noDataPanel');
+
+        if (splitSum === 0) {
+            // Show warning, hide simulation panel
+            if (noDataPanel) {
+                noDataPanel.innerHTML = '<div style="padding:40px 20px;text-align:center;">' +
+                    '<div style="font-size:40px;margin-bottom:12px;">⚠️</div>' +
+                    '<h3 style="color:#be123c;font-size:18px;margin:0 0 8px;">Setor Sem Dados Granuloquímicos</h3>' +
+                    '<p style="color:#64748b;max-width:500px;margin:0 auto 16px;line-height:1.6;">' +
+                    'Não existem análises granulométricas (frações G1 a G4) cadastradas no banco para o <strong>Corte ' + row.cut + '</strong>. ' +
+                    'Os cálculos de desdobramento, balanço de massas e reconciliação química não podem ser executados para este setor.' +
+                    '</p>' +
+                    '<div style="background:#fff1f2;border:1px solid #fecdd3;border-radius:10px;padding:14px 18px;max-width:460px;margin:0 auto;text-align:left;">' +
+                    '<strong style="color:#be123c;">📋 Recomendação Geológica:</strong>' +
+                    '<p style="color:#9f1239;margin:6px 0 0;font-size:12px;line-height:1.6;">Solicite à equipe de laboratório/geologia a realização de ensaios de granuloquímica (desdobramento em G1, G2, G3 e G4) para as amostras deste setor de lavra.</p>' +
+                    '</div>' +
+                    '</div>';
+                noDataPanel.style.display = 'block';
+            }
+            editPanel.style.opacity = "0.2";
+            editPanel.style.pointerEvents = "none";
+            const resultsArea = document.getElementById('resultsArea');
+            if (resultsArea) resultsArea.style.display = 'none';
+            return;
+        }
+
+        // Hide warning panel, show simulation panel
+        if (noDataPanel) noDataPanel.style.display = 'none';
 
         baseData.tonnes = row.tonnes;
         document.getElementById('targetOre').value = row.tonnes.toFixed(2);
@@ -618,9 +672,10 @@ export function generateStandaloneHTML(): string {
 
         updateSplitSum();
         
-        const editPanel = document.getElementById('editPanel');
         editPanel.style.opacity = "1";
         editPanel.style.pointerEvents = "auto";
+        const resultsArea2 = document.getElementById('resultsArea');
+        if (resultsArea2) resultsArea2.style.display = '';
     }
 
     function updateSplitSum() {
