@@ -1,4 +1,4 @@
-import { Product, Element, MiningRow } from "./types";
+import { Product, Element, MiningRow, ParseResult, OptimizerConfig, BlendAlternative, PlantPremises } from "./types";
 
 export const PRODUCTS: Product[] = [
   { id: "G1", name: "Frações G1 (1.4 mm)", size: "1.4 mm", color: "#0056b3", suffix: "1" },
@@ -24,105 +24,89 @@ export function parseNum(str: string): number {
   return isNaN(num) ? 0 : num;
 }
 
-export function parsePastedData(rawText: string): MiningRow[] {
-  if (!rawText.trim()) return [];
+export function parsePastedData(rawText: string): ParseResult {
+  const result: ParseResult = { rows: [], grandTotal: null };
+  if (!rawText.trim()) return result;
 
   const lines = rawText.split(/\r?\n/);
-  // Find index of header line containing 'tonnes' or 'cut' or 'g1'
+  
+  const splitLine = (l: string): string[] => {
+    if (l.includes("\t")) return l.split("\t").map(x => x.trim());
+    if (l.includes(";")) return l.split(";").map(x => x.trim());
+    return l.trim().split(/\s+/).map(x => x.trim()).filter(x => x !== "");
+  };
+
   let headerIdx = -1;
   for (let i = 0; i < lines.length; i++) {
-    const LowerLine = lines[i].toLowerCase();
+    const lowerLine = lines[i].toLowerCase();
     if (
-      (LowerLine.includes("tonnes") || LowerLine.includes("toneladas")) &&
-      (LowerLine.includes("cut") || LowerLine.includes("material") || LowerLine.includes("g1"))
+      (lowerLine.includes("tonnes") || lowerLine.includes("toneladas")) &&
+      (lowerLine.includes("cut") || lowerLine.includes("material") || lowerLine.includes("g1"))
     ) {
       headerIdx = i;
       break;
     }
   }
 
-  // If no header could be found of the expected types, we search for any line including key terms
-  if (headerIdx === -1) {
-    for (let i = 0; i < lines.length; i++) {
-      const LowerLine = lines[i].toLowerCase();
-      if (LowerLine.includes("g1") && LowerLine.includes("g2") && LowerLine.includes("g3")) {
-        headerIdx = i;
-        break;
-      }
-    }
-  }
+  const inferredHeader = [
+    "Cut", "Volume", "Tonnes", "FEGL", "SIGL", "ALGL", "PGL", "MNGL", "PFGL",
+    "G1", "FE1", "SI1", "AL1", "P1", "MN1", "PF1",
+    "G2", "FE2", "SI2", "AL2", "P2", "MN2", "PF2",
+    "G3", "FE3", "SI3", "AL3", "P3", "MN3", "PF3",
+    "G4", "FE4", "SI4", "AL4", "P4", "MN4", "PF4"
+  ];
 
-  if (headerIdx === -1) {
-    // If absolutely no header row is identified, assume the first row contains columns if they are strings
-    headerIdx = 0;
-  }
+  const headerLine = headerIdx >= 0 ? lines[headerIdx] : inferredHeader.join("\t");
+  const headers = splitLine(headerLine).map(h => h.toUpperCase().replace(/[^A-Z0-9]/g, ''));
 
-  const headerLine = lines[headerIdx];
-  const splitLine = (l: string): string[] => {
-    if (l.includes("\t")) {
-      return l.split("\t").map(x => x.trim());
-    }
-    if (l.includes(";")) {
-      return l.split(";").map(x => x.trim());
-    }
-    return l.split(/\s{2,}|,+/).map(x => x.trim()).filter(x => x !== "");
-  };
-
-  const headers = splitLine(headerLine);
-  const rows: MiningRow[] = [];
-
-  // Parse remaining lines as data
   for (let i = 0; i < lines.length; i++) {
     if (i === headerIdx) continue;
-    
     const rawValues = splitLine(lines[i]);
-    if (rawValues.length < 5 || lines[i].trim() === "" || lines[i].toLowerCase().includes("grand total")) {
-      continue;
-    }
+    if (rawValues.length < 5 || lines[i].trim() === "") continue;
+    
+    const isGrandTotal = lines[i].toLowerCase().includes("grand total") || rawValues[0].toLowerCase() === "total";
 
-    const getValByName = (colName: string): string => {
-      const idx = headers.findIndex(h => h.trim().toUpperCase() === colName.toUpperCase());
-      return idx > -1 && idx < rawValues.length ? rawValues[idx] : "";
+    const getVal = (possibleNames: string[], fallbackIndex: number): string => {
+      for (const name of possibleNames) {
+        const cleanName = name.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const idx = headers.findIndex(h => h === cleanName || h.includes(cleanName));
+        if (idx > -1 && idx < rawValues.length && rawValues[idx] !== "") {
+          return rawValues[idx];
+        }
+      }
+      return fallbackIndex < rawValues.length ? rawValues[fallbackIndex] : "";
     };
 
-    const cut = getValByName("Cut") || getValByName("Cuts") || rawValues[0] || `${rows.length + 1}`;
-    // Material is optional - if the header 'Material' exists, use it; otherwise leave empty
-    const hasMaterialCol = headers.some(h => h.trim().toUpperCase() === "MATERIAL" || h.trim().toUpperCase() === "TIPO");
-    const material = hasMaterialCol
-      ? (getValByName("Material") || getValByName("Tipo") || "")
-      : "";
-    const volume = parseNum(getValByName("Volume") || rawValues[2]);
-    const tonnes = parseNum(getValByName("Tonnes") || getValByName("Toneladas") || rawValues[3]);
+    const cut = getVal(["CUT", "CUTS", "FRENTE"], 0) || `${result.rows.length + 1}`;
+    const material = getVal(["MATERIAL", "TIPO"], -1);
+    const volume = parseNum(getVal(["VOLUME"], 1));
+    const tonnes = parseNum(getVal(["TONNES", "TONELADAS", "MASSA"], 2));
 
-    // Parse Chemistry Global values
     const globalChem: Record<string, number> = {};
+    let gChemIndex = 3;
     ELEMENTS.forEach(el => {
-      const colName = `${el.id}GL`; // FEGL, SIGL, ALGL, PGL, MNGL, PFGL
-      const valText = getValByName(colName) || getValByName(`${el.id}_GL`) || getValByName(el.id);
-      globalChem[el.id] = parseNum(valText);
+      globalChem[el.id] = parseNum(getVal([`${el.id}GL`, `${el.id}`], gChemIndex));
+      gChemIndex++;
     });
 
-    // Parse splits G1, G2, G3, G4
     const splits: Record<string, number> = {};
     PRODUCTS.forEach(p => {
-      const valText = getValByName(p.id);
-      splits[p.id] = parseNum(valText);
+      const pIndex = inferredHeader.indexOf(p.id);
+      splits[p.id] = parseNum(getVal([p.id], pIndex !== -1 ? pIndex : -1));
     });
 
-    // Parse products chemistry (G1: FE1, SI1, AL1, P1, MN1, PF1, etc)
     const productChem: Record<string, Record<string, number>> = {};
     PRODUCTS.forEach(p => {
       productChem[p.id] = {};
       ELEMENTS.forEach(el => {
-        // Excel column might be formatted as el.id + suffix (e.g. FE1, SI1) or el.id + _ + suffix
-        const colName = `${el.id}${p.suffix}`; // e.g. FE1, SI1, AL1
-        const valText = getValByName(colName) || getValByName(`${el.id}_${p.suffix}`);
-        productChem[p.id][el.id] = parseNum(valText);
+        const colName = `${el.id}${p.suffix}`;
+        const fallbackIdx = inferredHeader.indexOf(colName);
+        productChem[p.id][el.id] = parseNum(getVal([colName], fallbackIdx !== -1 ? fallbackIdx : -1));
       });
     });
 
-    rows.push({
-      cut,
+    const parsedRow = {
+      cut: isGrandTotal ? "Grand Total" : cut,
       material,
       volume,
       tonnes,
@@ -130,11 +114,328 @@ export function parsePastedData(rawText: string): MiningRow[] {
       splits,
       productChem,
       rawLine: lines[i]
-    });
+    };
+
+    if (isGrandTotal) {
+      if (tonnes > 0 || volume > 0) result.grandTotal = parsedRow;
+    } else {
+      result.rows.push(parsedRow);
+    }
+  }
+  return result;
+}
+
+// ============================================================================
+// OPTIMIZER ENGINE (Etapa 9)
+// ============================================================================
+export const OPTIMIZER_CONFIG: OptimizerConfig = {
+  weights: {
+    chem: 2.0,
+    granulo: 1.5,
+    frontCountPenalty: 0.1,
+    smallAllocationPenalty: 0.5
+  },
+  tolerances: {
+    chem: {
+      FE: 0.5,
+      SI: 0.5,
+      AL: 0.25,
+      P: 0.005,
+      MN: 0.05,
+      PF: 0.25
+    },
+    granulo: 1.0
+  }
+};
+
+// Fractions that should be MINIMIZED (losses)
+const MINIMIZE_SPLITS = new Set(['G1', 'G4']);
+// Fractions that should be MAXIMIZED within operational range (processable)
+const MAXIMIZE_SPLITS = new Set(['G2', 'G3']);
+
+export class OptimizerEngine {
+  private fronts: MiningRow[];
+  private targetMass: number;
+  private premises: PlantPremises;
+  private config: OptimizerConfig;
+  private tolPct: number; // user-defined relative tolerance 0-100
+
+  constructor(
+    fronts: MiningRow[],
+    targetMass: number,
+    premises: PlantPremises,
+    config: OptimizerConfig = OPTIMIZER_CONFIG,
+    tolPct: number = 5.0
+  ) {
+    this.fronts = fronts;
+    this.targetMass = targetMass;
+    this.premises = premises;
+    this.config = config;
+    this.tolPct = tolPct;
   }
 
-  return rows;
+  public run(): BlendAlternative[] {
+    if (this.fronts.length === 0) return [];
+
+    const iterations = 5000;
+    let solutions: BlendAlternative[] = [];
+
+    for (let i = 0; i < iterations; i++) {
+      let alloc = this.randomAllocation(this.fronts.length);
+
+      let currentScore = this.evaluate(alloc);
+      let improved = true;
+
+      while (improved) {
+        improved = false;
+        for (let j = 0; j < this.fronts.length; j++) {
+          if (alloc[j] === 0) continue;
+          for (let k = 0; k < this.fronts.length; k++) {
+            if (j === k) continue;
+            alloc[j] -= 1;
+            alloc[k] += 1;
+            const newScore = this.evaluate(alloc);
+            if (newScore > currentScore) {
+              currentScore = newScore;
+              improved = true;
+              break;
+            } else {
+              alloc[j] += 1;
+              alloc[k] -= 1;
+            }
+          }
+          if (improved) break;
+        }
+      }
+
+      solutions.push(this.buildAlternative(alloc, currentScore));
+    }
+
+    solutions.sort((a, b) => b.scores.global - a.scores.global);
+
+    const diverseSolutions: BlendAlternative[] = [];
+    for (const sol of solutions) {
+      if (diverseSolutions.length >= 3) break;
+      let isDiverse = true;
+      for (const existing of diverseSolutions) {
+        let distSq = 0;
+        for (let j = 0; j < this.fronts.length; j++) {
+          const diff = (sol.allocations[j] || 0) - (existing.allocations[j] || 0);
+          distSq += diff * diff;
+        }
+        if (Math.sqrt(distSq) < 5.0) { isDiverse = false; break; }
+      }
+      if (isDiverse) diverseSolutions.push(sol);
+    }
+
+    return diverseSolutions;
+  }
+
+  private randomAllocation(n: number): Record<number, number> {
+    const alloc: Record<number, number> = {};
+    for (let i = 0; i < n; i++) alloc[i] = 0;
+    let remaining = 100;
+    while (remaining > 0) {
+      const idx = Math.floor(Math.random() * n);
+      const amount = Math.min(remaining, Math.floor(Math.random() * 20) + 1);
+      alloc[idx] += amount;
+      remaining -= amount;
+    }
+    return alloc;
+  }
+
+  private evaluate(alloc: Record<number, number>): number {
+    const tol = this.tolPct / 100.0;
+    const blendGlobalChem: Record<string, number> = {};
+    const blendSplits: Record<string, number> = {};
+
+    ELEMENTS.forEach(el => blendGlobalChem[el.id] = 0);
+    PRODUCTS.forEach(p => blendSplits[p.id] = 0);
+
+    for (let i = 0; i < this.fronts.length; i++) {
+      const pct = alloc[i] / 100.0;
+      if (pct === 0) continue;
+      ELEMENTS.forEach(el => {
+        blendGlobalChem[el.id] += (this.fronts[i].globalChem[el.id] || 0) * pct;
+      });
+      PRODUCTS.forEach(p => {
+        blendSplits[p.id] += (this.fronts[i].splits[p.id] || 0) * pct;
+      });
+    }
+
+    // Chemistry penalty
+    let chemError = 0;
+    ELEMENTS.forEach(el => {
+      const target = this.premises.globalChem[el.id] || 0;
+      if (target > 0) {
+        const diff = Math.abs(blendGlobalChem[el.id] - target);
+        const tolerance = this.config.tolerances.chem[el.id] || 0.1;
+        chemError += Math.pow(diff / tolerance, 2);
+      }
+    });
+
+    // Granulometry penalty — operational logic
+    let granuloError = 0;
+    PRODUCTS.forEach(p => {
+      const target = this.premises.splits[p.id] || 0;
+      if (target <= 0) return;
+      const result = blendSplits[p.id];
+
+      if (MINIMIZE_SPLITS.has(p.id)) {
+        // G1, G4: only penalize if ABOVE target*(1+tol)
+        const upperLimit = target * (1 + tol);
+        if (result > upperLimit) {
+          granuloError += Math.pow((result - upperLimit) / (target * tol), 2) * 4;
+        }
+        // Small bonus: reward being below target (the lower, the better)
+        if (result < target) {
+          granuloError -= Math.min(0.5, (target - result) / target);
+        }
+      } else if (MAXIMIZE_SPLITS.has(p.id)) {
+        // G2, G3: penalize outside [target*(1-tol), target*(1+tol)]
+        const lowerLimit = target * (1 - tol);
+        const upperLimit = target * (1 + tol);
+        if (result < lowerLimit) {
+          granuloError += Math.pow((lowerLimit - result) / (target * tol), 2) * 2;
+        } else if (result > upperLimit) {
+          granuloError += Math.pow((result - upperLimit) / (target * tol), 2) * 2;
+        } else {
+          // Inside range: reward being higher (maximize G2+G3)
+          granuloError -= Math.min(0.5, (result - lowerLimit) / (upperLimit - lowerLimit) * 0.5);
+        }
+      }
+    });
+
+    // G2+G3 maximization bonus (within spec)
+    const g2 = blendSplits['G2'] || 0;
+    const g3 = blendSplits['G3'] || 0;
+    const g2Target = this.premises.splits['G2'] || 0;
+    const g3Target = this.premises.splits['G3'] || 0;
+    const g2Upper = g2Target * (1 + tol);
+    const g3Upper = g3Target * (1 + tol);
+    const g2InRange = g2 >= g2Target * (1 - tol) && g2 <= g2Upper;
+    const g3InRange = g3 >= g3Target * (1 - tol) && g3 <= g3Upper;
+    if (g2InRange && g3InRange) {
+      // Bonus proportional to how much of G2+G3 we have (within range)
+      const maxPossible = g2Upper + g3Upper;
+      const bonus = (g2 + g3) / maxPossible * 2.0;
+      granuloError -= bonus;
+    }
+
+    // Operational penalties
+    let usedFronts = 0;
+    let smallAllocations = 0;
+    for (let i = 0; i < this.fronts.length; i++) {
+      if (alloc[i] > 0) {
+        usedFronts++;
+        if (alloc[i] < 5) smallAllocations++;
+      }
+    }
+
+    const penalty = (usedFronts * this.config.weights.frontCountPenalty) +
+                    (smallAllocations * this.config.weights.smallAllocationPenalty);
+
+    const totalCost = (chemError * this.config.weights.chem) +
+                      (Math.max(0, granuloError) * this.config.weights.granulo) +
+                      penalty;
+
+    return Math.max(0, 100 - totalCost);
+  }
+
+  private buildAlternative(alloc: Record<number, number>, globalScore: number): BlendAlternative {
+    const tol = this.tolPct / 100.0;
+    const blendGlobalChem: Record<string, number> = {};
+    const blendSplits: Record<string, number> = {};
+    const blendProductChem: Record<string, Record<string, number>> = {};
+
+    ELEMENTS.forEach(el => blendGlobalChem[el.id] = 0);
+    PRODUCTS.forEach(p => {
+      blendSplits[p.id] = 0;
+      blendProductChem[p.id] = {};
+      ELEMENTS.forEach(el => blendProductChem[p.id][el.id] = 0);
+    });
+
+    let usedFronts = 0;
+    for (let i = 0; i < this.fronts.length; i++) {
+      const pct = alloc[i] / 100.0;
+      if (pct === 0) continue;
+      usedFronts++;
+      ELEMENTS.forEach(el => {
+        blendGlobalChem[el.id] += (this.fronts[i].globalChem[el.id] || 0) * pct;
+      });
+      PRODUCTS.forEach(p => {
+        const p_split = this.fronts[i].splits[p.id] || 0;
+        blendSplits[p.id] += p_split * pct;
+        ELEMENTS.forEach(el => {
+          blendProductChem[p.id][el.id] += (this.fronts[i].productChem[p.id][el.id] || 0) * (p_split * pct);
+        });
+      });
+    }
+
+    PRODUCTS.forEach(p => {
+      ELEMENTS.forEach(el => {
+        blendProductChem[p.id][el.id] = blendSplits[p.id] > 0
+          ? blendProductChem[p.id][el.id] / blendSplits[p.id]
+          : 0;
+      });
+    });
+
+    // Compute scores
+    let chemError = 0;
+    ELEMENTS.forEach(el => {
+      const target = this.premises.globalChem[el.id] || 0;
+      if (target > 0) {
+        const diff = Math.abs(blendGlobalChem[el.id] - target);
+        const relDev = target > 0 ? diff / target : 0;
+        chemError += relDev > tol ? Math.pow(relDev / tol, 2) : 0;
+      }
+    });
+
+    let granuloError = 0;
+    PRODUCTS.forEach(p => {
+      const target = this.premises.splits[p.id] || 0;
+      if (target <= 0) return;
+      const result = blendSplits[p.id];
+      const upperLimit = target * (1 + tol);
+      const lowerLimit = target * (1 - tol);
+      if (MINIMIZE_SPLITS.has(p.id)) {
+        if (result > upperLimit) granuloError += Math.pow((result - upperLimit) / (target * tol), 2);
+      } else {
+        if (result < lowerLimit) granuloError += Math.pow((lowerLimit - result) / (target * tol), 2);
+        else if (result > upperLimit) granuloError += Math.pow((result - upperLimit) / (target * tol), 2);
+      }
+    });
+
+    const chemScore = Math.max(0, 100 - (chemError * 25));
+    const granuloScore = Math.max(0, 100 - (granuloError * 25));
+    const operationalScore = Math.max(0, 100 - ((usedFronts - 1) * 5));
+
+    // Justifications
+    const justifications: string[] = [];
+    const g2 = blendSplits['G2'] || 0;
+    const g3 = blendSplits['G3'] || 0;
+    const g1 = blendSplits['G1'] || 0;
+    const g4 = blendSplits['G4'] || 0;
+    justifications.push(`G2+G3 (processáveis): ${(g2+g3).toFixed(2)}% | G1+G4 (perdas): ${(g1+g4).toFixed(2)}%`);
+    if (chemScore > 90) justifications.push('Atende integralmente às metas de qualidade química.');
+    else if (chemScore > 75) justifications.push('Boa aderência química, com pequenos desvios aceitáveis.');
+    else justifications.push('Apresenta desvios significativos em qualidade química.');
+    if (granuloScore > 90) justifications.push('Atende à granulometria operacional especificada.');
+    if (usedFronts <= 2) justifications.push('Alta simplicidade operacional (poucas frentes).');
+    else if (usedFronts > 4) justifications.push('Alta complexidade operacional (muitas frentes).');
+
+    return {
+      allocations: { ...alloc },
+      blendMass: this.targetMass,
+      blendGlobalChem,
+      blendSplits,
+      blendProductChem,
+      scores: { global: globalScore, chem: chemScore, granulo: granuloScore, operational: operationalScore },
+      justifications
+    };
+  }
 }
+
 
 export function generateStandaloneHTML(): string {
   const code = `<!DOCTYPE html>
@@ -463,7 +764,7 @@ export function generateStandaloneHTML(): string {
         { id: 'PF', label: 'PPC' }
     ];
 
-    let baseData = { products: {}, global: {}, tonnes: 0, rows: [] };
+    let baseData = { products: {}, global: {}, tonnes: 0, rows: [], grandTotal: null };
     let selectedRowIdx = 0;
 
     function parseNum(str) {
@@ -511,9 +812,11 @@ export function generateStandaloneHTML(): string {
         const headers = splitLine(lines[hIdx]);
         
         const foundRows = [];
+        let parsedGrandTotal = null;
         for (let i = hIdx + 1; i < lines.length; i++) {
             const vals = splitLine(lines[i]);
-            if (vals.length < 5 || lines[i].trim() === "" || lines[i].toLowerCase().includes("grand total")) {
+            const isGrandTotal = lines[i].toLowerCase().includes("grand total");
+            if (vals.length < 5 || lines[i].trim() === "") {
                 continue;
             }
 
@@ -549,12 +852,18 @@ export function generateStandaloneHTML(): string {
                 });
             });
 
-            foundRows.push({
-                cut, material: mat, volume, tonnes,
+            const rowObj = {
+                cut: isGrandTotal ? "Grand Total" : cut, material: mat, volume, tonnes,
                 globalChem: rowGlobalChem,
                 splits: rowSplits,
                 productChem: rowProdChem
-            });
+            };
+
+            if (isGrandTotal) {
+                parsedGrandTotal = rowObj;
+            } else {
+                foundRows.push(rowObj);
+            }
         }
 
         if (foundRows.length === 0) {
@@ -562,6 +871,7 @@ export function generateStandaloneHTML(): string {
         }
 
         baseData.rows = foundRows;
+        baseData.grandTotal = parsedGrandTotal;
         showRowSelector();
         selectRow(0);
     }
@@ -585,7 +895,7 @@ export function generateStandaloneHTML(): string {
             }
             const materialLabel = row.material ? ' &mdash; <strong>' + row.material + '</strong>' : '';
             el.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;width:100%;flex-wrap:wrap;gap:4px;">'
-                + '<span>Corte ' + row.cut + materialLabel + badge + '</span>'
+                + '<span>Frente ' + row.cut + materialLabel + badge + '</span>'
                 + '<span style="font-size:10px;color:#475569;">' + fmtNum(row.tonnes, 0) + ' t &bull; Fe ' + row.globalChem.FE.toFixed(2) + '%</span>'
                 + '</div>';
             el.onclick = () => selectRow(idx);
@@ -599,6 +909,10 @@ export function generateStandaloneHTML(): string {
         selectedRowIdx = idx;
         const row = baseData.rows[idx];
         
+        const selectedNameStr = "Frente " + row.cut + (row.material ? " (" + row.material + ")" : "");
+        document.getElementById('selectedRowName').textContent = selectedNameStr;
+        document.getElementById('selectedRowNameTables').textContent = selectedNameStr;
+
         // Mark selection
         document.querySelectorAll('.row-option').forEach((el, i) => {
             el.className = 'row-option ' + (i === idx ? 'selected' : '');
@@ -760,7 +1074,7 @@ export function generateStandaloneHTML(): string {
             let compRowsHtml = '';
             const row = baseData.rows[selectedRowIdx];
             elements.forEach(el => {
-                const analyzed = row.globalChem[el.id] || 0;
+                const analyzed = (baseData.grandTotal ? baseData.grandTotal.globalChem[el.id] : row.globalChem[el.id]) || 0;
                 const calculated = baseData.global[el.id] || 0;
                 const diff = calculated - analyzed;
                 const absDiff = Math.abs(diff);
@@ -1054,7 +1368,7 @@ export function generateStandaloneHTML(): string {
         let reconciliationFactors = {};
         const row = baseData.rows[selectedRowIdx];
         elements.forEach(el => {
-            let analyzed = row.globalChem[el.id] || 0;
+            let analyzed = (baseData.grandTotal ? baseData.grandTotal.globalChem[el.id] : row.globalChem[el.id]) || 0;
             let simulated = finalGlobalChem[el.id] || 0;
             reconciliationFactors[el.id] = simulated > 0 ? (analyzed / simulated) : 1;
         });

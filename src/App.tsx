@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
-import { PRODUCTS, ELEMENTS, parsePastedData, generateStandaloneHTML } from "./utils";
-import { MiningRow } from "./types";
+import { PRODUCTS, ELEMENTS, parsePastedData, generateStandaloneHTML, OptimizerEngine, OPTIMIZER_CONFIG } from "./utils";
+import { MiningRow, ParseResult, PlantPremises, BlendAlternative } from "./types";
 import { 
   FileSpreadsheet, 
   Download, 
@@ -47,19 +47,35 @@ const getConvergenceStatus = (elId: string, diff: number) => {
   return level;
 };
 
+const DEFAULT_PLANT_PREMISES: PlantPremises = {
+  globalChem: { FE: 42.56, SI: 31.27, AL: 3.77, P: 0.050, MN: 0.30, PF: 2.64 },
+  splits: { G1: 10.93, G2: 13.62, G3: 45.73, G4: 29.72 }
+};
+
 export default function App() {
   const [rawText, setRawText] = useState("");
   const [rows, setRows] = useState<MiningRow[]>([]);
+  const [grandTotal, setGrandTotal] = useState<MiningRow | null>(null);
+  // selectedRowIndex is ONLY for individual front detail view — never used by simulation
   const [selectedRowIndex, setSelectedRowIndex] = useState(-1);
+  // scenarioLoaded flags that buildGlobalScenario has run at least once
+  const [scenarioLoaded, setScenarioLoaded] = useState(false);
+
+  // Step 8: Plant Premises
+  const [premises, setPremises] = useState<PlantPremises>(DEFAULT_PLANT_PREMISES);
+  // Tolerância relativa (%) para avaliação do Blend e do Otimizador
+  const [blendTolerance, setBlendTolerance] = useState<number>(5.0);
+
+  // Step 9: Blend Optimization
+  const [blendAlternatives, setBlendAlternatives] = useState<BlendAlternative[]>([]);
+  const [isOptimizing, setIsOptimizing] = useState(false);
   const [targetOre, setTargetOre] = useState<number>(0);
   
-  // Scenarios state
+  // Global scenario state — updated ONLY by buildGlobalScenario()
   const [editedGlobalChem, setEditedGlobalChem] = useState<Record<string, number>>({});
   const [editedSplits, setEditedSplits] = useState<Record<string, number>>({});
-  
-  // Baseline loaded data to calculate scaling factors
   const [baselineGlobal, setBaselineGlobal] = useState<Record<string, number>>({});
-  const [baselineProductChem, setBaselineProductChem] = useState<Record<string, Record<string, number>>>({});
+  const [baselineProductChem, setBaselineProductChem] = useState<Record<string, Record<string, number>>>({}); 
 
   // Simulation result
   const [simulation, setSimulation] = useState<{
@@ -73,62 +89,79 @@ export default function App() {
 
   const [copySuccess, setCopySuccess] = useState(false);
 
+  /**
+   * buildGlobalScenario — the SINGLE source of truth for simulation state.
+   * Computes mass-weighted averages across ALL fronts and sets all baseline states.
+   * selectRow() must NEVER modify these states.
+   */
+  const buildGlobalScenario = (allRows: MiningRow[], gt: MiningRow | null) => {
+    if (allRows.length === 0) return;
+
+    // 1. Total mass: prefer grandTotal.tonnes, else sum of all fronts
+    const totalMass = (gt && gt.tonnes > 0) ? gt.tonnes : allRows.reduce((sum, r) => sum + r.tonnes, 0);
+    setTargetOre(totalMass);
+
+    // 2. Weighted splits: Σ(row.tonnes × row.splits[p]) / totalMass
+    const splitsMap: Record<string, number> = {};
+    PRODUCTS.forEach(p => {
+      const weightedSplit = allRows.reduce((sum, r) => sum + r.tonnes * (r.splits[p.id] || 0), 0);
+      splitsMap[p.id] = totalMass > 0 ? weightedSplit / totalMass : 0;
+    });
+    setEditedSplits(splitsMap);
+
+    // 3. Weighted product chemistry: Σ(row.tonnes × row.splits[p] × row.productChem[p][el])
+    //    normalized by Σ(row.tonnes × row.splits[p]) per product
+    const productChemMap: Record<string, Record<string, number>> = {};
+    PRODUCTS.forEach(p => {
+      productChemMap[p.id] = {};
+      const totalProductMass = allRows.reduce((sum, r) => sum + r.tonnes * (r.splits[p.id] || 0) / 100, 0);
+      ELEMENTS.forEach(el => {
+        const weightedChem = allRows.reduce((sum, r) => {
+          const pMass = r.tonnes * (r.splits[p.id] || 0) / 100;
+          return sum + pMass * (r.productChem[p.id]?.[el.id] || 0);
+        }, 0);
+        productChemMap[p.id][el.id] = totalProductMass > 0 ? weightedChem / totalProductMass : 0;
+      });
+    });
+    setBaselineProductChem(productChemMap);
+
+    // 4. Weighted global chemistry: Σ(row.tonnes × row.globalChem[el]) / totalMass
+    const globalChemMap: Record<string, number> = {};
+    ELEMENTS.forEach(el => {
+      const weightedChem = allRows.reduce((sum, r) => sum + r.tonnes * (r.globalChem[el.id] || 0), 0);
+      globalChemMap[el.id] = totalMass > 0 ? weightedChem / totalMass : 0;
+    });
+    setBaselineGlobal(globalChemMap);
+    setEditedGlobalChem(globalChemMap);
+
+    setScenarioLoaded(true);
+  };
+
+  /**
+   * selectRow — ONLY marks which front is highlighted for detail view.
+   * Does NOT modify targetOre, baselineGlobal, baselineProductChem,
+   * editedSplits, or editedGlobalChem.
+   */
+  const selectRow = (index: number) => {
+    setSelectedRowIndex(index);
+  };
+
   // Load spreadsheet paste
   const handleLoadData = (textToParse: string) => {
     const parsed = parsePastedData(textToParse);
-    if (parsed.length === 0) {
+    if (parsed.rows.length === 0) {
       alert("Nenhum dado legível pôde ser interpretado. Certifique-se de copiar os cabeçalhos 'Cut', 'Material', 'Tonnes' e 'G1' conforme o template.");
       return;
     }
-    setRows(parsed);
-    selectRow(parsed, 0);
-  };
-
-  const selectRow = (currentRows: MiningRow[], index: number) => {
-    setSelectedRowIndex(index);
-    const row = currentRows[index];
-    setTargetOre(row.tonnes);
-
-    // Initial chemistry mapping & calculating global averages by mass-yield weighting
-    let accumMass = 0;
-    const accumChem: Record<string, number> = {};
-    ELEMENTS.forEach(el => {
-      accumChem[el.id] = 0;
-    });
-
-    const splitsMap: Record<string, number> = {};
-    const productChemMap: Record<string, Record<string, number>> = {};
-
-    PRODUCTS.forEach(prod => {
-      const splitPct = row.splits[prod.id] || 0;
-      splitsMap[prod.id] = splitPct;
-
-      const pMass = row.tonnes * (splitPct / 100);
-      accumMass += pMass;
-
-      productChemMap[prod.id] = { ...row.productChem[prod.id] };
-
-      ELEMENTS.forEach(el => {
-        const gradeValue = row.productChem[prod.id][el.id] || 0;
-        accumChem[el.id] += gradeValue * pMass;
-      });
-    });
-
-    // Compute baseline global averages from mass-yield weightings
-    const baselineGlobalComputed: Record<string, number> = {};
-    ELEMENTS.forEach(el => {
-      baselineGlobalComputed[el.id] = accumMass > 0 ? accumChem[el.id] / accumMass : 0;
-    });
-
-    setBaselineGlobal(baselineGlobalComputed);
-    setEditedGlobalChem(baselineGlobalComputed);
-    setEditedSplits(splitsMap);
-    setBaselineProductChem(productChemMap);
+    setRows(parsed.rows);
+    setGrandTotal(parsed.grandTotal);
+    setSelectedRowIndex(0);
+    buildGlobalScenario(parsed.rows, parsed.grandTotal);
   };
 
   // Run the process simulation math
   const runSimulation = () => {
-    if (selectedRowIndex === -1 || rows.length === 0) return;
+    if (!scenarioLoaded || rows.length === 0) return;
 
     // 1. Calculate factor multipliers for chemistry scaling
     const factors: Record<string, number> = {};
@@ -191,25 +224,35 @@ export default function App() {
     });
   };
 
-  // Automatically simulate when inputs (targetOre, editedGlobalChem, editedSplits) change to make it feel amazing
+  const runOptimization = () => {
+    setIsOptimizing(true);
+    setTimeout(() => {
+      const engine = new OptimizerEngine(rows, targetOre || 100, premises, OPTIMIZER_CONFIG, blendTolerance);
+      const alternatives = engine.run();
+      setBlendAlternatives(alternatives);
+      setIsOptimizing(false);
+    }, 50);
+  };
+
+  // Re-run simulation whenever the global scenario inputs change
   useEffect(() => {
-    if (selectedRowIndex !== -1 && rows.length > 0) {
+    if (scenarioLoaded && rows.length > 0) {
       runSimulation();
     }
-  }, [selectedRowIndex, targetOre, editedGlobalChem, editedSplits]);
+  }, [scenarioLoaded, targetOre, editedGlobalChem, editedSplits]);
 
-  // Load sample content on component mount
+  // Load sample data on component mount
   useEffect(() => {
     setRawText(SAMPLE_PASTE);
     const parsed = parsePastedData(SAMPLE_PASTE);
-    setRows(parsed);
-    if (parsed.length > 0) {
-      // Defer to prevent effect loop
-      setTimeout(() => {
-        selectRow(parsed, 0);
-      }, 50);
+    setRows(parsed.rows);
+    setGrandTotal(parsed.grandTotal);
+    if (parsed.rows.length > 0) {
+      setSelectedRowIndex(0);
+      setTimeout(() => buildGlobalScenario(parsed.rows, parsed.grandTotal), 50);
     }
   }, []);
+
 
   // Download stand-alone browser file
   const downloadStandalone = () => {
@@ -252,7 +295,7 @@ export default function App() {
     csv += "\nCOMPARATIVO QUÍMICA ANALISADA GLOBAL VS. CALCULADA PELAS FRAÇÕES\n";
     csv += "Elemento\tTeor Analisado (%)\tTeor Calculado (%)\tDesvio Absoluto\tStatus\n";
     ELEMENTS.forEach(el => {
-      const analyzed = rows[selectedRowIndex]?.globalChem[el.id] || 0;
+      const analyzed = grandTotal?.globalChem[el.id] || rows[0]?.globalChem[el.id] || 0;
       const calculated = baselineGlobal[el.id] || 0;
       const diff = calculated - analyzed;
       const status = getConvergenceStatus(el.id, diff);
@@ -270,7 +313,7 @@ export default function App() {
       csv += `${p.name}\t${simulation.productMasses[p.id].toFixed(2)}\t${simulation.ratios[p.id].toFixed(2)}%`;
       ELEMENTS.forEach(el => {
         const originalGrade = simulation.productChem[p.id][el.id] || 0;
-        const analyzedGlobal = rows[selectedRowIndex]?.globalChem[el.id] || 0;
+        const analyzedGlobal = grandTotal?.globalChem[el.id] || rows[0]?.globalChem[el.id] || 0;
         const simulatedGlobal = simulation.globalChem[el.id] || 0;
         const factor = simulatedGlobal > 0 ? (analyzedGlobal / simulatedGlobal) : 1;
         const reconciledGrade = originalGrade * factor;
@@ -378,7 +421,7 @@ export default function App() {
               {rows.length > 0 && (
                 <div className="mt-5 pt-4 border-t border-slate-100">
                   <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block mb-2">
-                    Cortes Identificados ({rows.length})
+                    Frentes de Lavra ({rows.length})
                   </span>
                   <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                     {rows.map((row, idx) => {
@@ -386,7 +429,7 @@ export default function App() {
                       return (
                         <button
                           key={idx}
-                          onClick={() => selectRow(rows, idx)}
+                          onClick={() => selectRow(idx)}
                           className={`w-full text-left p-2.5 rounded-lg transition-all flex flex-col gap-1.5 border ${
                             idx === selectedRowIndex
                               ? "bg-blue-50 border-blue-200 text-blue-900 font-semibold shadow-sm"
@@ -395,7 +438,7 @@ export default function App() {
                         >
                           <div className="flex justify-between items-center w-full">
                             <span className="font-bold text-slate-800">
-                              Corte {row.cut}
+                              Frente {row.cut}
                             </span>
                             <span className="font-mono text-slate-700">
                               {row.tonnes.toLocaleString("pt-BR", { maximumFractionDigits: 0 })} t
@@ -443,7 +486,7 @@ export default function App() {
             </div>
 
             {/* Target Production Ore */}
-            {selectedRowIndex !== -1 && (
+            {scenarioLoaded && (
               <div id="target-ore-panel" className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm text-slate-900">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest block mb-1.5 font-sans">
                   Meta de Alimentação (t)
@@ -473,10 +516,10 @@ export default function App() {
             
             {/* Scenario panel */}
             <div id="scenario-panel" className={`bg-white border border-slate-200 rounded-2xl p-6 transition-all shadow-sm ${
-              selectedRowIndex === -1 ? "opacity-30 pointer-events-none" : ""
+              !scenarioLoaded ? "opacity-30 pointer-events-none" : ""
             }`}>
               
-              {selectedRowIndex === -1 ? (
+              {!scenarioLoaded ? (
                 <div className="py-20 flex flex-col items-center justify-center text-center">
                   <Database className="h-10 w-10 text-slate-400 mb-3 animate-bounce" />
                   <h3 className="text-lg font-medium text-slate-500">Nenhum teor carregado</h3>
@@ -487,30 +530,22 @@ export default function App() {
               ) : (
                 <>
                   {(() => {
-                    const selectedRow = rows[selectedRowIndex];
-                    const splitSum = (selectedRow?.splits.G1 || 0) + (selectedRow?.splits.G2 || 0) + (selectedRow?.splits.G3 || 0) + (selectedRow?.splits.G4 || 0);
-                    if (splitSum === 0) return (
+                    // Check if the global scenario has enough data (at least one front with splits)
+                    const hasAnySplits = rows.some(r => (r.splits.G1 || 0) + (r.splits.G2 || 0) + (r.splits.G3 || 0) + (r.splits.G4 || 0) > 0);
+                    if (!hasAnySplits) return (
                       <div className="py-16 flex flex-col items-center justify-center text-center px-4">
                         <AlertCircle className="h-14 w-14 text-rose-500 mb-4 animate-bounce" />
-                        <h3 className="text-xl font-bold text-slate-800">Setor Sem Dados Granuloquímicos</h3>
+                        <h3 className="text-xl font-bold text-slate-800">Sem Dados Granuloquímicos</h3>
                         <p className="text-sm text-slate-500 max-w-lg mt-2 leading-relaxed">
-                          Não existem análises granulométricas (frações G1 a G4) cadastradas no banco para o <strong>Corte {selectedRow?.cut}</strong>. 
-                          Os cálculos de desdobramento, balanço de massas e reconciliação química não podem ser executados para este setor.
+                          Nenhuma das frentes carregadas possui análises granulométricas (G1 a G4). Os cálculos não podem ser executados.
                         </p>
-                        <div className="mt-6 p-4 bg-rose-50 border border-rose-100 rounded-xl max-w-md text-left flex gap-2.5">
-                          <Sparkles className="h-5 w-5 text-rose-500 shrink-0 mt-0.5" />
-                          <p className="text-xs text-rose-800 leading-relaxed">
-                            <strong>Recomendação Geológica:</strong> Solicite à equipe de laboratório/geologia a realização de ensaios de granuloquímica (desdobramento em G1, G2, G3 e G4) para as amostras deste setor de lavra.
-                          </p>
-                        </div>
                       </div>
                     );
                     return null;
                   })()}
                   {(() => {
-                    const selectedRow = rows[selectedRowIndex];
-                    const splitSum = (selectedRow?.splits.G1 || 0) + (selectedRow?.splits.G2 || 0) + (selectedRow?.splits.G3 || 0) + (selectedRow?.splits.G4 || 0);
-                    if (splitSum === 0) return null;
+                    const hasAnySplits = rows.some(r => (r.splits.G1 || 0) + (r.splits.G2 || 0) + (r.splits.G3 || 0) + (r.splits.G4 || 0) > 0);
+                    if (!hasAnySplits) return null;
                     return (
                   <>
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4 mb-6">
@@ -521,12 +556,12 @@ export default function App() {
                         <div>
                           <h2 className="text-base font-bold text-slate-900 flex items-center gap-2 flex-wrap">
                             2. Ajustes Interativos do Cenário
-                            <span className="text-slate-600 font-medium bg-slate-100 px-2.5 py-0.5 rounded-full text-xs">
-                               Corte {rows[selectedRowIndex]?.cut || ""}{rows[selectedRowIndex]?.material ? `: ${rows[selectedRowIndex]?.material}` : ""}
+                            <span className="text-emerald-700 font-semibold bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full text-xs">
+                              Cenário Global ({rows.length} frente{rows.length !== 1 ? "s" : ""})
                             </span>
                           </h2>
-                          <p className="text-xs text-slate-500">
-                            Os fatores multiplicadores de extrapolação física e química recalculam as frações instantaneamente
+                          <p className="text-xs text-slate-500 mt-1">
+                            Os fatores multiplicadores de extrapolação física e química recalculam as frações instantaneamente.
                           </p>
                         </div>
                       </div>
@@ -534,12 +569,12 @@ export default function App() {
 
                   {/* Subsection A: Chemistry controls */}
                   <div className="space-y-4 mb-8">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-col gap-1">
                       <span className="text-[11px] font-bold tracking-wider text-slate-500 uppercase">
-                        A. Química Global Alvo (Média Ponderada)
+                        A. Química Global Analisada
                       </span>
-                      <span className="text-[10px] text-slate-400 italic">
-                        Valores originais aproximados calculados da cubagem
+                      <span className="text-[10px] text-slate-400">
+                        Resultados da química global obtidos a partir das análises da base de dados importada. Esses valores representam a referência química original do cenário, antes dos ajustes e da normalização matemática das frações.
                       </span>
                     </div>
 
@@ -549,10 +584,21 @@ export default function App() {
                         const currentValue = editedGlobalChem[el.id] || 0;
                         const hasChanged = Math.abs(currentValue - originalValue) > 0.001;
 
+                        // Calculado Bruto = média ponderada da química das frações
+                        // usando os splits originais como pesos (antes de normalizar para 100%)
+                        // Fórmula: Σ(split_raw × química_fração) / Σ(split_raw)
+                        const totalRawSplit = PRODUCTS.reduce((s, p) => s + (editedSplits[p.id] || 0), 0);
+                        const bruteNum = PRODUCTS.reduce((sum, p) => {
+                          const pSplitRaw = editedSplits[p.id] || 0;
+                          const pChemOrig = baselineProductChem[p.id]?.[el.id] || 0;
+                          return sum + (pSplitRaw * pChemOrig);
+                        }, 0);
+                        const bruteValue = totalRawSplit > 0 ? bruteNum / totalRawSplit : 0;
+
                         return (
                           <div
                             key={el.id}
-                            className="bg-slate-5o bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col justify-between hover:bg-slate-100/40 transition-all shadow-xs"
+                            className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col justify-between hover:bg-slate-100/40 transition-all shadow-xs"
                           >
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-bold text-slate-600">{el.label}</span>
@@ -572,11 +618,19 @@ export default function App() {
                                 step={el.precision === 3 ? "0.001" : "0.01"}
                               />
                             </div>
-                            <div className="text-[9px] text-center text-slate-500 border-t border-slate-200/80 pt-1 flex justify-between px-1">
-                              <span>Natural:</span>
-                              <span className="font-mono text-slate-650">
-                                {originalValue.toFixed(el.precision)}%
-                              </span>
+                            <div className="text-[9px] text-left text-slate-500 border-t border-slate-200/80 pt-1.5 space-y-1">
+                              <div className="flex justify-between">
+                                <span>Analisado (Base):</span>
+                                <span className="font-mono text-slate-600 font-semibold">
+                                  {originalValue.toFixed(el.precision)}%
+                                </span>
+                              </div>
+                              <div className="flex justify-between" title="Média ponderada da química das frações pelos splits originais calculados, antes da normalização para 100%">
+                                <span>Calculado Bruto:</span>
+                                <span className="font-mono text-slate-400">
+                                  {bruteValue.toFixed(el.precision)}%
+                                </span>
+                              </div>
                             </div>
                           </div>
                         );
@@ -597,9 +651,25 @@ export default function App() {
 
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                       {PRODUCTS.map(p => {
-                        const originalSplit = rows[selectedRowIndex]?.splits[p.id] || 0;
+                        // Compare current edited split vs. the global weighted baseline
+                        const originalSplit = baselineGlobal[p.id] !== undefined
+                          ? editedSplits[p.id]  // show hasChanged relative to baseline stored at load
+                          : 0;
+                        // Actually: track change vs the baseline set by buildGlobalScenario
+                        // We'll use a derived value from baselineProductChem implicitly;
+                        // for the "Inicial" label use the value stored in editedSplits when scenario loaded.
+                        // Simplest: just show the current value, mark changed if differs from the
+                        // per-product weighted average that was set at load time.
+                        // We store that in a separate ref-like approach — but for now just use
+                        // the editedSplits value itself (user edits will show as changed naturally).
+                        const baselineSplitForProduct = (() => {
+                          // Re-compute from all rows to show as "Inicial"
+                          const totalMass = grandTotal ? grandTotal.tonnes : rows.reduce((s, r) => s + r.tonnes, 0);
+                          const w = rows.reduce((sum, r) => sum + r.tonnes * (r.splits[p.id] || 0), 0);
+                          return totalMass > 0 ? w / totalMass : 0;
+                        })();
                         const currentSplit = editedSplits[p.id] || 0;
-                        const hasChanged = Math.abs(currentSplit - originalSplit) > 0.01;
+                        const hasChanged = Math.abs(currentSplit - baselineSplitForProduct) > 0.01;
 
                         return (
                           <div
@@ -640,7 +710,7 @@ export default function App() {
 
                             <div className="text-[9px] text-slate-500 flex justify-between items-center text-left border-t border-slate-200/60 pt-1.5">
                               <span>Inicial:</span>
-                              <span className="font-mono text-slate-600">{originalSplit.toFixed(2)}%</span>
+                              <span className="font-mono text-slate-600">{baselineSplitForProduct.toFixed(2)}%</span>
                             </div>
                           </div>
                         );
@@ -674,11 +744,8 @@ export default function App() {
                         {/* Reset button to baseline splits */}
                         <button
                           onClick={() => {
-                            if (selectedRowIndex !== -1) {
-                              const row = rows[selectedRowIndex];
-                              setEditedSplits({ ...row.splits });
-                              setEditedGlobalChem({ ...baselineGlobal });
-                            }
+                            // Restore global baseline splits and chemistry
+                            buildGlobalScenario(rows, grandTotal);
                           }}
                           className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-[11px] font-bold text-slate-700 rounded-lg transition-all flex items-center gap-1.5 shrink-0 border border-slate-300 shadow-sm"
                         >
@@ -697,9 +764,9 @@ export default function App() {
 
             {/* Simulated Case Results */}
             {simulation && (() => {
-              const selectedRow = rows[selectedRowIndex];
-              const splitSum = (selectedRow?.splits.G1 || 0) + (selectedRow?.splits.G2 || 0) + (selectedRow?.splits.G3 || 0) + (selectedRow?.splits.G4 || 0);
-              if (splitSum === 0) return null;
+              // Guard: need at least one front with splits to show results
+              const hasAnySplits = rows.some(r => (r.splits.G1 || 0) + (r.splits.G2 || 0) + (r.splits.G3 || 0) + (r.splits.G4 || 0) > 0);
+              if (!hasAnySplits) return null;
               return (
                 <div id="results-panel" className="space-y-8 animate-fade-in">
                 
@@ -715,7 +782,7 @@ export default function App() {
                           3. Análise Global Estimada do Processamento
                         </h2>
                         <span className="text-xs text-slate-500">
-                          Recalculada dinamicamente via balanço de massas dos produtos extrapolados
+                          Química global calculada a partir do balanço de massas das frações, considerando a normalização das frações para que sua soma totalize 100%.
                         </span>
                       </div>
                     </div>
@@ -849,207 +916,101 @@ export default function App() {
                     4. Frações Resultantes do Desdobramento Estendido
                   </h2>
                   
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                    {PRODUCTS.map(p => {
-                      const mass = simulation.productMasses[p.id] || 0;
-                      const yieldPct = simulation.ratios[p.id] || 0;
-                      const pChem = simulation.productChem[p.id] || {};
-
-                      return (
-                        <div
-                          key={p.id}
-                          className="bg-white border border-slate-200 rounded-2xl overflow-hidden hover:border-slate-300 hover:shadow-xs transition-all flex flex-col justify-between shadow-sm"
-                        >
-                          <div className="px-4 py-3 flex items-center justify-between bg-slate-50 border-b border-slate-100">
-                            <div>
-                              <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                  <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="bg-slate-50 text-slate-500 uppercase tracking-wider text-[10px] font-semibold border-b border-slate-200">
+                          <th className="px-4 py-3 text-left">Fração</th>
+                          <th className="px-4 py-3 text-right">Original</th>
+                          <th className="px-4 py-3 text-right">Normalizada</th>
+                          <th className="px-4 py-3 text-right">Diferença</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {PRODUCTS.map(p => {
+                          const original = editedSplits[p.id] || 0;
+                          const normalized = simulation.ratios[p.id] || 0;
+                          const diff = normalized - original;
+                          return (
+                            <tr key={p.id} className="hover:bg-slate-50/50">
+                              <td className="px-4 py-3 font-bold text-slate-700 flex items-center gap-2">
                                 <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: p.color }} />
                                 {p.name}
-                              </h3>
-                              <span className="text-[10px] text-slate-500 font-mono block mt-0.5">
-                                Granulometria {p.size}
-                              </span>
-                            </div>
-                            <span className="text-[11px] font-bold py-0.5 px-2 bg-white border border-slate-200 text-slate-700 rounded font-mono shadow-xs">
-                              {p.id}
-                            </span>
-                          </div>
-
-                          <div className="px-4 py-3.5 bg-slate-50/50 font-sans space-y-1 border-b border-slate-100">
-                            <div className="flex justify-between items-center">
-                              <span className="text-[10px] text-slate-500 font-medium">Massa do Produto:</span>
-                              <span className="text-xs font-bold font-mono" style={{ color: p.color }}>
-                                {mass.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} t
-                              </span>
-                            </div>
-                            <div className="flex justify-between items-center">
-                              <span className="text-[10px] text-slate-500 font-medium">Fração de Rendimento:</span>
-                              <span className="text-xs font-bold text-slate-700 font-mono">
-                                {yieldPct.toFixed(2)}%
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="p-4 bg-white space-y-2">
-                            {ELEMENTS.map(el => {
-                              const grade = pChem[el.id] || 0;
-                              return (
-                                <div key={el.id} className="flex justify-between items-center text-xs">
-                                  <span className="text-slate-500 font-medium">{el.label}</span>
-                                  <span className="font-semibold text-slate-800 font-mono">
-                                    {grade.toLocaleString("pt-BR", {
-                                      minimumFractionDigits: el.precision,
-                                      maximumFractionDigits: el.precision
-                                    })}
-                                    %
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })}
+                              </td>
+                              <td className="px-4 py-3 text-right font-mono text-slate-600">
+                                {original.toFixed(3)}%
+                              </td>
+                              <td className="px-4 py-3 text-right font-mono font-bold text-blue-700">
+                                {normalized.toFixed(3)}%
+                              </td>
+                              <td className={`px-4 py-3 text-right font-mono font-semibold ${diff > 0 ? 'text-emerald-600' : diff < 0 ? 'text-rose-600' : 'text-slate-400'}`}>
+                                {diff > 0 ? '+' : ''}{diff.toFixed(3)} p.p.
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        <tr className="bg-slate-50">
+                          <td className="px-4 py-3 font-bold text-slate-900 uppercase">Total</td>
+                          <td className="px-4 py-3 text-right font-mono font-bold text-slate-900">
+                            {PRODUCTS.reduce((s, p) => s + (editedSplits[p.id] || 0), 0).toFixed(3)}%
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono font-bold text-blue-700">
+                            100.000%
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono text-slate-500">—</td>
+                        </tr>
+                      </tbody>
+                    </table>
                   </div>
                 </div>
 
-                {/* 5. Pure Custom SVG Line Charts for Each Element */}
+                {/* 5. Perfis Químicos por Fração */}
                 <div>
                   <h2 className="text-sm font-bold text-slate-800 uppercase tracking-wider mb-1 flex items-center gap-2">
                     <span className="flex h-1.5 w-1.5 rounded-full bg-blue-500" />
-                    5. Perfis Químicos Estendidos por Elementos
+                    5. Perfis Químicos por Fração
                   </h2>
                   <p className="text-xs text-slate-500 mb-4 ml-3.5">
-                    Visão sistemática da alteração de teores por tamanho de partícula (G1 a G4)
+                    Teor químico de cada fração granulométrica após os ajustes do cenário. A química das frações não se altera com a normalização dos splits — apenas os pesos mudam.
                   </p>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {ELEMENTS.map(el => {
-                      // Extract points
-                      const pts = PRODUCTS.map((p, idx) => ({
-                        x: 50 + idx * 80, // discrete particles
-                        val: simulation.productChem[p.id][el.id] || 0,
-                        name: p.id,
-                        color: p.color
-                      }));
-
-                      // Calculate min & max with margin for chart bounds
-                      const vals = pts.map(p => p.val);
-                      let minVal = Math.min(...vals);
-                      let maxVal = Math.max(...vals);
-                      
-                      // Handle constant grades
-                      if (Math.abs(minVal - maxVal) < 0.001) {
-                        minVal = Math.max(0, minVal - 0.5);
-                        maxVal = maxVal + 0.5;
-                      } else {
-                        const delta = maxVal - minVal;
-                        minVal = Math.max(0, minVal - delta * 0.15);
-                        maxVal = maxVal + delta * 0.15;
-                      }
-
-                      const chartHeight = 110; // SVG canvas height for content
-                      const getSvgY = (v: number) => {
-                        const pct = (v - minVal) / (maxVal - minVal);
-                        return 130 - pct * chartHeight; // invert Y coordinate + padding
-                      };
-
-                      // Generate SVG path string
-                      const dPath = pts.reduce((acc, point, i) => {
-                        const sx = point.x;
-                        const sy = getSvgY(point.val);
-                        return i === 0 ? `M ${sx} ${sy}` : `${acc} L ${sx} ${sy}`;
-                      }, "");
-
-                      return (
-                        <div
-                          key={el.id}
-                          className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm text-slate-900"
-                        >
-                          <div className="flex justify-between items-center mb-3">
-                            <span className="text-xs font-bold text-slate-700">{el.label} (%)</span>
-                            <span className="text-[10px] text-slate-500 font-mono bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
-                              Min/Max: {minVal.toFixed(el.id === "P" ? 2 : 1)}% / {maxVal.toFixed(el.id === "P" ? 2 : 1)}%
-                            </span>
-                          </div>
-
-                          <div className="bg-slate-50/50 rounded-xl border border-slate-100 p-2 relative">
-                            <svg viewBox="0 0 340 160" className="w-full h-auto overflow-visible">
-                              {/* Y Gridlines */}
-                              {[0, 0.25, 0.5, 0.75, 1].map((pRatio, i) => {
-                                const valY = minVal + pRatio * (maxVal - minVal);
-                                const sy = getSvgY(valY);
-                                return (
-                                  <g key={i}>
-                                    <line
-                                      x1="35"
-                                      y1={sy}
-                                      x2="310"
-                                      y2={sy}
-                                      className="stroke-slate-200"
-                                      strokeWidth="1"
-                                      strokeDasharray="2 3"
-                                    />
-                                    <text
-                                      x="10"
-                                      y={sy + 3}
-                                      className="fill-slate-400 font-mono text-[9px]"
-                                    >
-                                      {valY.toFixed(el.id === "P" ? 3 : 1)}
-                                    </text>
-                                  </g>
-                                );
-                              })}
-
-                              {/* Curve path */}
-                              <path
-                                d={dPath}
-                                fill="none"
-                                className="stroke-slate-300"
-                                strokeWidth="2.5"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              />
-
-                              {/* Points & Data Callouts */}
-                              {pts.map((pt, idx) => {
-                                const px = pt.x;
-                                const py = getSvgY(pt.val);
-                                return (
-                                  <g key={idx}>
-                                    <circle
-                                      cx={px}
-                                      cy={py}
-                                      r="5.5"
-                                      fill={pt.color}
-                                      className="stroke-white hover:r-7 transition-all cursor-pointer shadow-sm"
-                                      strokeWidth="1.5"
-                                    />
-                                    {/* Grade value label */}
-                                    <text
-                                      x={px}
-                                      y={py - 11}
-                                      textAnchor="middle"
-                                      className="fill-slate-800 font-bold font-mono text-[10px]"
-                                    >
-                                      {pt.val.toFixed(el.precision)}
-                                    </text>
-                                    <text
-                                      x={px}
-                                      y="150"
-                                      textAnchor="middle"
-                                      className="fill-slate-500 font-bold text-[9px] uppercase tracking-wider"
-                                    >
-                                      {pt.name}
-                                    </text>
-                                  </g>
-                                );
-                              })}
-                            </svg>
-                          </div>
+                    {ELEMENTS.map(el => (
+                      <div
+                        key={el.id}
+                        className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm text-slate-900"
+                      >
+                        <div className="flex justify-between items-center mb-3">
+                          <span className="text-xs font-bold text-slate-700">{el.label} (%)</span>
                         </div>
-                      );
-                    })}
+                        <div className="bg-slate-50 border border-slate-100 rounded-xl overflow-hidden">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="bg-slate-100/60 text-slate-500 uppercase tracking-wider text-[9px] font-semibold border-b border-slate-200">
+                                <th className="px-3 py-2 text-left">Fração</th>
+                                <th className="px-3 py-2 text-right">Teor (%)</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {PRODUCTS.map(p => {
+                                const teor = simulation.productChem[p.id]?.[el.id] || 0;
+                                return (
+                                  <tr key={p.id} className="hover:bg-slate-100/40">
+                                    <td className="px-3 py-2 font-bold text-slate-700 flex items-center gap-1.5">
+                                      <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: p.color }} />
+                                      {p.id}
+                                    </td>
+                                    <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">
+                                      {teor.toFixed(el.precision)}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
@@ -1082,23 +1043,16 @@ export default function App() {
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {ELEMENTS.map(el => {
-                          const analyzed = rows[selectedRowIndex]?.globalChem[el.id] || 0;
-                          const calculated = baselineGlobal[el.id] || 0;
+                          const analyzed = baselineGlobal[el.id] || 0;
+                          const calculated = simulation.globalChem[el.id] || 0;
                           const diff = calculated - analyzed;
-                          const status = getConvergenceStatus(el.id, diff);
                           
-                          let badgeClass = "";
-                          let badgeText = "";
-                          if (status === 'excellent') {
-                            badgeClass = "bg-emerald-50 text-emerald-700 border-emerald-200";
-                            badgeText = "Excelente";
-                          } else if (status === 'moderate') {
-                            badgeClass = "bg-amber-50 text-amber-700 border-amber-200";
-                            badgeText = "Moderado";
-                          } else {
-                            badgeClass = "bg-rose-50 text-rose-700 border-rose-200";
-                            badgeText = "Divergente";
-                          }
+                          // Convert status logic to relative desvio %
+                          const desvioPct = analyzed > 0 ? (diff / analyzed) * 100 : 0;
+                          const isHighDiff = Math.abs(desvioPct) > 5;
+                          
+                          let badgeClass = isHighDiff ? "bg-rose-50 text-rose-700 border-rose-200" : "bg-emerald-50 text-emerald-700 border-emerald-200";
+                          let badgeText = isHighDiff ? "Divergente (>5%)" : "Excelente (≤5%)";
 
                           return (
                             <tr key={el.id} className="hover:bg-slate-50/50">
@@ -1110,10 +1064,10 @@ export default function App() {
                                 {calculated.toLocaleString("pt-BR", { minimumFractionDigits: el.precision, maximumFractionDigits: el.precision })}%
                               </td>
                               <td className={`px-4 py-3 text-right font-mono font-bold ${diff > 0 ? "text-blue-600" : diff < 0 ? "text-red-600" : "text-slate-600"}`}>
-                                {diff >= 0 ? "+" : ""}{diff.toLocaleString("pt-BR", { minimumFractionDigits: el.precision, maximumFractionDigits: el.precision })}%
+                                {diff >= 0 ? "+" : ""}{diff.toLocaleString("pt-BR", { minimumFractionDigits: el.precision, maximumFractionDigits: el.precision })} p.p.
                               </td>
                               <td className="px-4 py-3 text-center">
-                                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${badgeClass}`}>
+                                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold border shadow-xs ${badgeClass}`}>
                                   {badgeText}
                                 </span>
                               </td>
@@ -1155,7 +1109,7 @@ export default function App() {
                     </h3>
                     <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
                       {ELEMENTS.map(el => {
-                        const analyzed = rows[selectedRowIndex]?.globalChem[el.id] || 0;
+                        const analyzed = grandTotal?.globalChem[el.id] || rows[0]?.globalChem[el.id] || 0;
                         const simulated = simulation.globalChem[el.id] || 0;
                         const factor = simulated > 0 ? (analyzed / simulated) : 1;
                         const pctChange = (factor - 1) * 100;
@@ -1231,7 +1185,7 @@ export default function App() {
                           <div className="p-4 bg-white space-y-2">
                             {ELEMENTS.map(el => {
                               const originalGrade = pChem[el.id] || 0;
-                              const analyzedGlobal = rows[selectedRowIndex]?.globalChem[el.id] || 0;
+                              const analyzedGlobal = grandTotal?.globalChem[el.id] || rows[0]?.globalChem[el.id] || 0;
                               const simulatedGlobal = simulation.globalChem[el.id] || 0;
                               const factor = simulatedGlobal > 0 ? (analyzedGlobal / simulatedGlobal) : 1;
                               const reconciledGrade = originalGrade * factor;
@@ -1264,6 +1218,399 @@ export default function App() {
 
               </div>
             )})()}
+
+            {/* Step 8: Plant Premises */}
+            {rows.length > 0 && (
+              <div id="plant-premises-panel" className="bg-white border border-slate-200 rounded-2xl p-6 transition-all shadow-sm">
+                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2 mb-2">
+                  <span className="bg-slate-100 text-slate-700 rounded-full w-6 h-6 inline-flex items-center justify-center text-xs font-mono">
+                    8
+                  </span>
+                  Premissas da Planta (Metas)
+                </h2>
+                <p className="text-xs text-slate-500 mb-6">
+                  Defina os targets químicos e granulométricos da usina. Eles serão usados para sugerir o blend ótimo.
+                </p>
+
+                {/* Tolerância */}
+                <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl flex flex-col md:flex-row md:items-center gap-3">
+                  <div className="flex-1">
+                    <span className="text-xs font-bold text-amber-800">Tolerância Operacional (%)</span>
+                    <p className="text-[10px] text-amber-600 mt-0.5">
+                      Tolerância relativa aplicada à avaliação do Blend, à Carta de Controle e ao Otimizador.
+                      Para G1 e G4 (minimizar): aplica-se apenas o limite superior. Para G2 e G3 (faixa operacional): aplica-se o intervalo ±Tolerância.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <input
+                      type="number"
+                      value={blendTolerance}
+                      onChange={(e) => setBlendTolerance(Math.max(0.1, Math.min(50, parseFloat(e.target.value) || 5)))}
+                      className="w-24 bg-white border border-amber-300 rounded-lg px-2 py-1.5 text-sm font-mono font-bold text-amber-900 text-center focus:border-amber-500"
+                      step="0.5"
+                      min="0.1"
+                      max="50"
+                    />
+                    <span className="text-sm font-bold text-amber-700">%</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-700 mb-3 border-b border-slate-100 pb-2">
+                      Qualidade Química
+                    </h3>
+                    <div className="grid grid-cols-3 gap-3">
+                      {ELEMENTS.map(el => (
+                        <div key={el.id} className="space-y-1">
+                          <label className="text-[10px] font-bold text-slate-500 uppercase">{el.label}</label>
+                          <input
+                            type="number"
+                            value={premises.globalChem[el.id] || 0}
+                            onChange={(e) => setPremises({
+                              ...premises,
+                              globalChem: { ...premises.globalChem, [el.id]: parseFloat(e.target.value) || 0 }
+                            })}
+                            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-xs font-mono focus:border-blue-500/50"
+                            step="0.01"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-700 mb-3 border-b border-slate-100 pb-2">
+                      Distribuição Granulométrica
+                    </h3>
+                    <div className="grid grid-cols-2 gap-3">
+                      {PRODUCTS.map(p => {
+                        const isMinimize = p.id === 'G1' || p.id === 'G4';
+                        const isMaximize = p.id === 'G2' || p.id === 'G3';
+                        return (
+                          <div key={p.id} className="space-y-1">
+                            <div className="flex items-center justify-between">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase">{p.name}</label>
+                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${isMinimize ? 'bg-rose-50 text-rose-600 border border-rose-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+                                {isMinimize ? '↓ Minimizar' : '↑ Maximizar'}
+                              </span>
+                            </div>
+                            <input
+                              type="number"
+                              value={premises.splits[p.id] || 0}
+                              onChange={(e) => setPremises({
+                                ...premises,
+                                splits: { ...premises.splits, [p.id]: parseFloat(e.target.value) || 0 }
+                              })}
+                              className={`w-full bg-slate-50 border rounded-lg px-2 py-1.5 text-xs font-mono focus:border-blue-500/50 ${isMinimize ? 'border-rose-200' : 'border-emerald-200'}`}
+                              step="0.1"
+                            />
+                            <p className="text-[9px] text-slate-400">
+                              {isMinimize
+                                ? `Limite máx: ${((premises.splits[p.id] || 0) * (1 + blendTolerance/100)).toFixed(2)}%`
+                                : `Faixa: ${((premises.splits[p.id] || 0) * (1 - blendTolerance/100)).toFixed(2)}% – ${((premises.splits[p.id] || 0) * (1 + blendTolerance/100)).toFixed(2)}%`
+                              }
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex justify-between items-center">
+                  <button
+                    onClick={() => setPremises(DEFAULT_PLANT_PREMISES)}
+                    className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs transition-all flex items-center justify-center gap-2 shadow-sm"
+                  >
+                    Restaurar Premissas da Planta
+                  </button>
+                  <button
+                    onClick={runOptimization}
+                    disabled={isOptimizing}
+                    className="py-2.5 px-5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl text-xs transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    {isOptimizing ? "Otimizando..." : "Gerar Sugestões de Blend"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Step 9: Blend Suggestion */}
+            {blendAlternatives.length > 0 && (
+              <div id="blend-suggestion-panel" className="bg-white border border-slate-200 rounded-2xl p-6 transition-all shadow-sm">
+                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2 mb-2">
+                  <span className="bg-emerald-100 text-emerald-700 rounded-full w-6 h-6 inline-flex items-center justify-center text-xs font-mono">
+                    9
+                  </span>
+                  Sugestão Automática de Blend
+                </h2>
+                <p className="text-xs text-slate-500 mb-6">
+                  As melhores alternativas de blend (mix inteiro) encontradas pela heurística para atender às metas.
+                </p>
+
+                <div className="space-y-6">
+                  {blendAlternatives.map((alt, altIdx) => (
+                    <div key={altIdx} className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                      <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold ${altIdx === 0 ? "text-amber-600 bg-amber-100" : "text-slate-600 bg-slate-200"} px-2 py-1 rounded`}>
+                            {altIdx === 0 ? "🏆 Top 1 (Recomendado)" : `Top ${altIdx + 1} Alternativa`}
+                          </span>
+                        </div>
+                        <div className="flex-1">
+                          {(() => {
+                            const tol = blendTolerance / 100;
+                            const chemElements = ELEMENTS.filter(e => premises.globalChem[e.id] > 0);
+                            let chemPass = 0;
+                            const chemDetails = chemElements.map(el => {
+                              const result = alt.blendGlobalChem[el.id] || 0;
+                              const target = premises.globalChem[el.id] || 0;
+                              const desvioPct = target > 0 ? (result / target - 1) * 100 : 0;
+                              // Chemistry always uses symmetric ±tol
+                              const passed = Math.abs(desvioPct) <= blendTolerance + 0.001;
+                              if (passed) chemPass++;
+                              return {
+                                type: 'chem', id: el.id, label: el.label, result, target, desvioPct, passed,
+                                min: target * (1 - tol), max: target * (1 + tol), precision: el.precision,
+                                isMinimize: false
+                              };
+                            });
+
+                            const splitProducts = PRODUCTS.filter(p => premises.splits[p.id] > 0);
+                            let splitPass = 0;
+                            const splitDetails = splitProducts.map(p => {
+                              const result = alt.blendSplits[p.id] || 0;
+                              const target = premises.splits[p.id] || 0;
+                              const desvioPct = target > 0 ? (result / target - 1) * 100 : 0;
+                              const isMinimize = p.id === 'G1' || p.id === 'G4';
+                              // G1/G4: pass if result <= target*(1+tol) (minimize — lower is better)
+                              // G2/G3: pass if within [target*(1-tol), target*(1+tol)]
+                              const passed = isMinimize
+                                ? result <= target * (1 + tol) + 0.001
+                                : Math.abs(desvioPct) <= blendTolerance + 0.001;
+                              if (passed) splitPass++;
+                              return {
+                                type: 'split', id: p.id, label: p.name, result, target, desvioPct, passed,
+                                min: isMinimize ? null : target * (1 - tol),
+                                max: target * (1 + tol), precision: 2, isMinimize
+                              };
+                            });
+
+                            const isViable = Object.values(alt.allocations).some(v => v > 0);
+                            const totalCrit = chemElements.length + splitProducts.length;
+                            const totalPass = chemPass + splitPass;
+                            const chemKPI = chemElements.length > 0 ? (chemPass / chemElements.length) * 100 : 0;
+                            const splitKPI = splitProducts.length > 0 ? (splitPass / splitProducts.length) * 100 : 0;
+                            const geralKPI = totalCrit > 0 ? (totalPass / totalCrit) * 100 : 0;
+                            const atende = totalPass === totalCrit && isViable;
+
+                            // Failed items for detail list
+                            const failedSplits = splitDetails.filter(r => !r.passed);
+                            const failedChem = chemDetails.filter(r => !r.passed);
+
+                            // Normalized splits for column
+                            const splitNormTotal = PRODUCTS.reduce((s, p) => s + (premises.splits[p.id] || 0), 0);
+
+                            return (
+                              <div className="flex flex-col w-full">
+                                {/* Top KPIs */}
+                                <div className="grid grid-cols-4 divide-x divide-slate-200 border-b border-slate-200 bg-slate-50">
+                                  <div className="p-3 flex flex-col items-center justify-center text-center">
+                                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1">Química</span>
+                                    <span className="text-lg font-bold text-blue-700">{chemKPI.toFixed(0)}%</span>
+                                    <span className="text-[10px] text-slate-500">{chemPass}/{chemElements.length} atendidos</span>
+                                  </div>
+                                  <div className="p-3 flex flex-col items-center justify-center text-center">
+                                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1">Granulo</span>
+                                    <span className="text-lg font-bold text-purple-700">{splitKPI.toFixed(0)}%</span>
+                                    <span className="text-[10px] text-slate-500">{splitPass}/{splitProducts.length} atendidos</span>
+                                  </div>
+                                  <div className="p-3 flex flex-col items-center justify-center text-center">
+                                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1">Viabilidade</span>
+                                    <span className={`text-lg font-bold ${isViable ? "text-emerald-600" : "text-rose-600"}`}>
+                                      {isViable ? "100%" : "0%"}
+                                    </span>
+                                    <span className="text-[10px] text-slate-500">{isViable ? "VIÁVEL" : "NÃO VIÁVEL"}</span>
+                                  </div>
+                                  <div className="p-3 flex flex-col items-center justify-center text-center">
+                                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1">Geral</span>
+                                    <span className="text-lg font-bold text-slate-800">{geralKPI.toFixed(0)}%</span>
+                                    <span className="text-[10px] text-slate-500">{totalPass}/{totalCrit} critérios atendidos</span>
+                                  </div>
+                                </div>
+
+                                {/* Status Banner */}
+                                <div className={`p-3 border-b border-slate-200 ${atende ? "bg-emerald-100/50" : "bg-rose-100/50"}`}>
+                                  <h3 className={`text-sm font-black tracking-wide text-center ${atende ? "text-emerald-700" : "text-rose-700"}`}>
+                                    {atende ? "✓ BLEND ATENDE À ESPECIFICAÇÃO" : "✕ BLEND NÃO ATENDE À ESPECIFICAÇÃO"}
+                                  </h3>
+                                  {!atende && (
+                                    <div className="mt-1.5 flex flex-wrap gap-1 justify-center">
+                                      {failedSplits.length > 0 && (
+                                        <span className="text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-0.5">
+                                          Granulo fora: {failedSplits.map(r => r.id).join(', ')}
+                                        </span>
+                                      )}
+                                      {failedChem.length > 0 && (
+                                        <span className="text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-0.5">
+                                          Química fora: {failedChem.map(r => r.label).join(', ')}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Main Content Layout */}
+                                <div className="flex flex-col lg:flex-row p-4 gap-6">
+
+                                  {/* Left: Composição + Justificativa */}
+                                  <div className="lg:w-1/4 space-y-4">
+                                    <div>
+                                      <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-3">Composição do Blend</h4>
+                                      <div className="space-y-2">
+                                        {rows.map((r, rIdx) => {
+                                          const alloc = alt.allocations[rIdx] || 0;
+                                          if (alloc === 0) return null;
+                                          return (
+                                            <div key={rIdx} className="flex justify-between items-center text-xs">
+                                              <span className="font-semibold text-slate-700">Frente {r.cut}</span>
+                                              <span className="font-mono bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-100 shadow-xs">{alloc}%</span>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                    <div className="pt-3 border-t border-slate-100">
+                                      <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Justificativa</h4>
+                                      <ul className="text-[10px] text-slate-600 space-y-1 list-disc pl-3">
+                                        {alt.justifications.map((just, jIdx) => (
+                                          <li key={jIdx}>{just}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  </div>
+
+                                  {/* Right: Carta de Controle */}
+                                  <div className="lg:w-3/4 space-y-4">
+
+                                    {/* Granulometria */}
+                                    <div>
+                                      <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">
+                                        Granulometria — Original → Especificação → Blend
+                                        <span className="ml-2 font-normal text-amber-600">(Tol. {blendTolerance.toFixed(1)}%)</span>
+                                      </h4>
+                                      <div className="border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                                        <table className="w-full text-xs">
+                                          <thead>
+                                            <tr className="bg-slate-50 text-[9px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                                              <th className="px-3 py-2 text-left">Fração</th>
+                                              <th className="px-3 py-2 text-center text-slate-400">Tipo</th>
+                                              <th className="px-3 py-2 text-right">Original</th>
+                                              <th className="px-3 py-2 text-right">Espec. Norm.</th>
+                                              <th className="px-3 py-2 text-right text-rose-500/80">Limite Inferior</th>
+                                              <th className="px-3 py-2 text-right font-bold text-blue-700">Blend</th>
+                                              <th className="px-3 py-2 text-right text-rose-500/80">Limite Superior</th>
+                                              <th className="px-3 py-2 text-center">Status</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-slate-100">
+                                            {splitDetails.map((row, i) => {
+                                              const origSplit = editedSplits[row.id] || 0;
+                                              const normSplit = splitNormTotal > 0 ? (premises.splits[row.id] || 0) : (premises.splits[row.id] || 0);
+                                              return (
+                                                <tr key={i} className="hover:bg-slate-50/50">
+                                                  <td className="px-3 py-2 font-bold text-slate-700">{row.label}</td>
+                                                  <td className="px-3 py-2 text-center">
+                                                    <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${row.isMinimize ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-700'}`}>
+                                                      {row.isMinimize ? '↓ Min' : '↑ Max'}
+                                                    </span>
+                                                  </td>
+                                                  <td className="px-3 py-2 text-right font-mono text-slate-400">{origSplit.toFixed(3)}%</td>
+                                                  <td className="px-3 py-2 text-right font-mono text-slate-600">{row.target.toFixed(3)}%</td>
+                                                  <td className="px-3 py-2 text-right font-mono text-slate-400">
+                                                    {row.isMinimize ? '—' : `${(row.min!).toFixed(3)}%`}
+                                                  </td>
+                                                  <td className="px-3 py-2 text-right font-mono font-bold text-slate-900 bg-blue-50/30">
+                                                    {row.result.toFixed(3)}%
+                                                  </td>
+                                                  <td className="px-3 py-2 text-right font-mono text-slate-400">{row.max.toFixed(3)}%</td>
+                                                  <td className="px-3 py-2 text-center">
+                                                    {row.passed ? (
+                                                      <span className="inline-flex text-emerald-600 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-[10px] font-black">✓</span>
+                                                    ) : (
+                                                      <span className="inline-flex text-rose-600 bg-rose-50 border border-rose-200 rounded px-1.5 py-0.5 text-[10px] font-black">✕</span>
+                                                    )}
+                                                  </td>
+                                                </tr>
+                                              );
+                                            })}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+
+                                    {/* Química */}
+                                    <div>
+                                      <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">
+                                        Química — Analisada → Calculada Normalizada → Blend
+                                      </h4>
+                                      <div className="border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                                        <table className="w-full text-xs">
+                                          <thead>
+                                            <tr className="bg-slate-50 text-[9px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                                              <th className="px-3 py-2 text-left">Elemento</th>
+                                              <th className="px-3 py-2 text-right text-slate-400">Analisada</th>
+                                              <th className="px-3 py-2 text-right">Calc. Norm.</th>
+                                              <th className="px-3 py-2 text-right text-rose-500/80">Limite −{blendTolerance.toFixed(0)}%</th>
+                                              <th className="px-3 py-2 text-right font-bold text-blue-700">Blend</th>
+                                              <th className="px-3 py-2 text-right text-emerald-600/80">Limite +{blendTolerance.toFixed(0)}%</th>
+                                              <th className="px-3 py-2 text-right">Desvio</th>
+                                              <th className="px-3 py-2 text-center">Status</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-slate-100">
+                                            {chemDetails.map((row, i) => {
+                                              const analisada = baselineGlobal[row.id] || 0;
+                                              const calcNorm = simulation?.globalChem[row.id] || 0;
+                                              return (
+                                                <tr key={i} className="hover:bg-slate-50/50">
+                                                  <td className="px-3 py-2 font-bold text-slate-700">{row.label}</td>
+                                                  <td className="px-3 py-2 text-right font-mono text-slate-400">{analisada.toFixed(row.precision)}%</td>
+                                                  <td className="px-3 py-2 text-right font-mono text-slate-600">{calcNorm.toFixed(row.precision)}%</td>
+                                                  <td className="px-3 py-2 text-right font-mono text-slate-400">{row.min.toFixed(row.precision)}%</td>
+                                                  <td className="px-3 py-2 text-right font-mono font-bold text-slate-900 bg-blue-50/30">{row.result.toFixed(row.precision)}%</td>
+                                                  <td className="px-3 py-2 text-right font-mono text-slate-400">{row.max.toFixed(row.precision)}%</td>
+                                                  <td className={`px-3 py-2 text-right font-mono font-bold ${row.passed ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                                    {row.desvioPct > 0 ? '+' : ''}{row.desvioPct.toFixed(2)}%
+                                                  </td>
+                                                  <td className="px-3 py-2 text-center">
+                                                    {row.passed ? (
+                                                      <span className="inline-flex text-emerald-600 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 text-[10px] font-black">✓</span>
+                                                    ) : (
+                                                      <span className="inline-flex text-rose-600 bg-rose-50 border border-rose-200 rounded px-1.5 py-0.5 text-[10px] font-black">✕</span>
+                                                    )}
+                                                  </td>
+                                                </tr>
+                                              );
+                                            })}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
           </div>
           
